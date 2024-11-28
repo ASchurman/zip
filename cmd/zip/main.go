@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+
+	"github.com/ASchurman/zip"
 )
 
 func main() {
@@ -15,16 +17,16 @@ func main() {
 		return
 	}
 
-	zf, err := openZipFile(args[0])
+	zf, err := zip.Open(args[0])
 	if err != nil {
 		panic(err)
 	}
 	if zf == nil {
 		panic("openZipFile returned nil without having an error")
 	}
-	defer zf.close()
+	defer zf.Close()
 
 	if *table {
-		zf.display()
+		zf.Display()
 	}
 }

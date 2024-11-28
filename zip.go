@@ -1,4 +1,4 @@
-package main
+package zip
 
 import (
 	"encoding/binary"
@@ -10,16 +10,16 @@ import (
 	"time"
 )
 
-type zipFile struct {
+type File struct {
 	name          string
 	file          *os.File
 	numEntries    uint16 // number of entries in the central directory
 	commentLength uint16
 	comment       []byte
-	fileHeaders   []fileHeader
+	fileHeaders   []FileHeader
 }
 
-type fileHeader struct {
+type FileHeader struct {
 	versionMadeBy     uint16
 	versionNeeded     uint16
 	flags             uint16
@@ -51,16 +51,16 @@ func dosToTime(dosDate uint16, dosTime uint16) time.Time {
 	return time.Date(int(year)+1980, time.Month(month), int(day), int(hr), int(min), int(sec), 0, time.Local)
 }
 
-func (fh *fileHeader) getDateTime() time.Time {
+func (fh *FileHeader) getDateTime() time.Time {
 	return dosToTime(fh.dosDate, fh.dosTime)
 }
 
-func openZipFile(name string) (*zipFile, error) {
+func Open(name string) (*File, error) {
 	file, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
-	zf := zipFile{name: name, file: file}
+	zf := File{name: name, file: file}
 	err = zf.readDirectory()
 	if err != nil {
 		return nil, err
@@ -68,13 +68,13 @@ func openZipFile(name string) (*zipFile, error) {
 	return &zf, nil
 }
 
-func (zf *zipFile) close() {
+func (zf *File) Close() {
 	if zf.file != nil {
 		zf.file.Close()
 	}
 }
 
-func (zf *zipFile) readDirectory() error {
+func (zf *File) readDirectory() error {
 	// Start at the end of the file and look for the end of central directory signature
 	fi, err := zf.file.Stat()
 	if err != nil {
@@ -140,7 +140,7 @@ func (zf *zipFile) readDirectory() error {
 		if buffer[i] != 0x50 || buffer[i+1] != 0x4b || buffer[i+2] != 0x01 || buffer[i+3] != 0x02 {
 			return errors.New("couldn't find central directory file header signature")
 		}
-		fh := fileHeader{}
+		fh := FileHeader{}
 		fh.versionMadeBy = binary.LittleEndian.Uint16(buffer[i+4 : i+6])
 		fh.versionNeeded = binary.LittleEndian.Uint16(buffer[i+6 : i+8])
 		fh.flags = binary.LittleEndian.Uint16(buffer[i+8 : i+10])
@@ -175,7 +175,7 @@ func (zf *zipFile) readDirectory() error {
 	return nil
 }
 
-func (zf *zipFile) display() {
+func (zf *File) Display() {
 	fmt.Printf("Archive: %s\n\n", zf.name)
 	w := new(tabwriter.Writer)
 	w.Init(os.Stdout, 8, 0, 1, ' ', tabwriter.AlignRight)
