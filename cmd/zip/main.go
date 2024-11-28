@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/ASchurman/zip"
 )
@@ -17,16 +18,21 @@ func main() {
 		return
 	}
 
-	zf, err := zip.Open(args[0])
+	file, err := os.Open(args[0])
 	if err != nil {
 		panic(err)
 	}
-	if zf == nil {
-		panic("openZipFile returned nil without having an error")
+	defer file.Close()
+
+	zd, err := zip.NewZipDir(args[0], file)
+	if err != nil {
+		panic(err)
 	}
-	defer zf.Close()
+	if zd == nil {
+		panic("NewZipDir returned nil without having an error")
+	}
 
 	if *table {
-		zf.Display()
+		zd.Display(os.Stdout)
 	}
 }

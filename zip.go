@@ -4,19 +4,21 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
-	"os"
 	"text/tabwriter"
 	"time"
 )
 
-type File struct {
-	name          string
-	file          *os.File
-	numEntries    uint16 // number of entries in the central directory
-	commentLength uint16
-	comment       []byte
-	fileHeaders   []FileHeader
+type ZipDir struct {
+	name             string
+	stream           io.ReadWriteSeeker
+	numEntries       uint16 // number of entries in the central directory
+	commentLength    uint16
+	comment          []byte
+	fileHeaders      []FileHeader
+	centralDirOffset uint32
+	centralDirSize   uint32
 }
 
 type FileHeader struct {
@@ -55,44 +57,28 @@ func (fh *FileHeader) getDateTime() time.Time {
 	return dosToTime(fh.dosDate, fh.dosTime)
 }
 
-func Open(name string) (*File, error) {
-	file, err := os.Open(name)
+func NewZipDir(name string, stream io.ReadWriteSeeker) (*ZipDir, error) {
+	zd := ZipDir{name: name, stream: stream}
+	err := zd.readDirectory()
 	if err != nil {
 		return nil, err
 	}
-	zf := File{name: name, file: file}
-	err = zf.readDirectory()
-	if err != nil {
-		return nil, err
-	}
-	return &zf, nil
+	return &zd, nil
 }
 
-func (zf *File) Close() {
-	if zf.file != nil {
-		zf.file.Close()
-	}
-}
-
-func (zf *File) readDirectory() error {
+func (zd *ZipDir) readDirectory() error {
 	// Start at the end of the file and look for the end of central directory signature
-	fi, err := zf.file.Stat()
-	if err != nil {
-		return err
-	}
-	fileSize := fi.Size()
-
 	// End of central directory is record is 22 bytes plus the zip file comment.
 	// Start at EOF-22 and go backwards, looking for the end of central directory signature.
 	found := false
 	buffer := make([]byte, 22)
-	offset := fileSize - 22
-	for ; offset > 0 && !found; offset-- {
-		_, err = zf.file.Seek(offset, 0)
+	offset := int64(-22) // offset is measured from the end of the stream
+	for ; !found; offset-- {
+		_, err := zd.stream.Seek(offset, io.SeekEnd)
 		if err != nil {
-			return err
+			return errors.New("couldn't find end of directory signature (seek failed)")
 		}
-		err = binary.Read(zf.file, binary.LittleEndian, &buffer)
+		err = binary.Read(zd.stream, binary.LittleEndian, &buffer)
 		if err != nil {
 			return err
 		}
@@ -108,35 +94,35 @@ func (zf *File) readDirectory() error {
 	// buffer contains 22 bytes of the end of central directory record, starting from signature.
 	// Now read the rest of the end of central directory record.
 	// Ignore anything involving a directory spanning multiple disks...
-	zf.numEntries = binary.LittleEndian.Uint16(buffer[10:12])
-	centralDirectorySize := binary.LittleEndian.Uint32(buffer[12:16])
-	centralDirectoryOffset := binary.LittleEndian.Uint32(buffer[16:20])
-	zf.commentLength = binary.LittleEndian.Uint16(buffer[20:22])
-	if zf.commentLength > 0 {
-		zf.comment = make([]byte, zf.commentLength)
-		_, err = zf.file.Seek(offset+22, 0)
+	zd.numEntries = binary.LittleEndian.Uint16(buffer[10:12])
+	zd.centralDirSize = binary.LittleEndian.Uint32(buffer[12:16])
+	zd.centralDirOffset = binary.LittleEndian.Uint32(buffer[16:20])
+	zd.commentLength = binary.LittleEndian.Uint16(buffer[20:22])
+	if zd.commentLength > 0 {
+		zd.comment = make([]byte, zd.commentLength)
+		_, err := zd.stream.Seek(offset+22, 0)
 		if err != nil {
 			return err
 		}
-		err = binary.Read(zf.file, binary.LittleEndian, &zf.comment)
+		err = binary.Read(zd.stream, binary.LittleEndian, &zd.comment)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Read the central directory
-	buffer = make([]byte, centralDirectorySize)
-	_, err = zf.file.Seek(int64(centralDirectoryOffset), 0)
+	buffer = make([]byte, zd.centralDirSize)
+	_, err := zd.stream.Seek(int64(zd.centralDirOffset), 0)
 	if err != nil {
 		return err
 	}
-	err = binary.Read(zf.file, binary.LittleEndian, &buffer)
+	err = binary.Read(zd.stream, binary.LittleEndian, &buffer)
 	if err != nil {
 		return err
 	}
 	// buffer now contains the central directory
 	i := 0
-	for entry := 0; entry < int(zf.numEntries); entry++ {
+	for entry := 0; entry < int(zd.numEntries); entry++ {
 		if buffer[i] != 0x50 || buffer[i+1] != 0x4b || buffer[i+2] != 0x01 || buffer[i+3] != 0x02 {
 			return errors.New("couldn't find central directory file header signature")
 		}
@@ -165,30 +151,34 @@ func (zf *File) readDirectory() error {
 		if fh.commentLength > 0 {
 			fh.comment = string(buffer[i+46+int(fh.nameLength)+int(fh.extraLength) : i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength)])
 		}
-		zf.fileHeaders = append(zf.fileHeaders, fh)
+		zd.fileHeaders = append(zd.fileHeaders, fh)
 		i += 46 + int(fh.nameLength) + int(fh.extraLength) + int(fh.commentLength)
 	}
 
 	// Don't bother reading the local file headers to make sure that the central directory
-	// is valid.
+	// is valid. Do that lazily, when we actually need to look at the local file headers.
 
 	return nil
 }
 
-func (zf *File) Display() {
-	fmt.Printf("Archive: %s\n\n", zf.name)
+func (zd *ZipDir) Display(output io.Writer) {
+	fmt.Printf("Archive: %s\n", zd.name)
+	if zd.commentLength > 0 {
+		fmt.Printf("Comment: %s\n", zd.comment)
+	}
+
 	w := new(tabwriter.Writer)
-	w.Init(os.Stdout, 8, 0, 1, ' ', tabwriter.AlignRight)
+	w.Init(output, 8, 0, 1, ' ', tabwriter.AlignRight)
 
 	fmt.Fprintln(w, "Length\tMethod\tSize\tCmpr\tDate\tTime\tCRC-32\tName\t")
 	fmt.Fprintln(w, "------\t------\t------\t------\t------\t------\t------\t------\t")
 
-	for _, fh := range zf.fileHeaders {
+	for _, fh := range zd.fileHeaders {
 		compressedPercent := int(math.Floor(float64(fh.compressedSize) / float64(fh.uncompressedSize) * 100))
 		dt := fh.getDateTime()
-		fmt.Fprintf(w, "%d\t%d\t%d\t%d%%\t%s\t%s\t%x\t%s\t\n",
+		fmt.Fprintf(w, "%d\t%s\t%d\t%d%%\t%s\t%s\t%x\t%s\t\n",
 			fh.uncompressedSize,
-			fh.compressionMethod,
+			compressionMethodToString(fh.compressionMethod),
 			fh.compressedSize,
 			compressedPercent,
 			dt.Format("2006-01-02"),
@@ -197,4 +187,15 @@ func (zf *File) Display() {
 			fh.fileName)
 	}
 	w.Flush()
+}
+
+func compressionMethodToString(compressionMethod uint16) string {
+	switch compressionMethod {
+	case 0:
+		return "stored"
+	case 8:
+		return "deflated"
+	default:
+		return fmt.Sprintf("%d", compressionMethod)
+	}
 }
