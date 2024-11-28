@@ -74,8 +74,8 @@ func (zd *ZipDir) readDirectory() error {
 	buffer := make([]byte, 22)
 	offset := int64(-22) // offset is measured from the end of the stream
 	for ; !found; offset-- {
-		_, err := zd.stream.Seek(offset, io.SeekEnd)
-		if err != nil {
+		pos, err := zd.stream.Seek(offset, io.SeekEnd)
+		if err != nil || pos < 0 {
 			return errors.New("couldn't find end of directory signature (seek failed)")
 		}
 		err = binary.Read(zd.stream, binary.LittleEndian, &buffer)
@@ -100,11 +100,7 @@ func (zd *ZipDir) readDirectory() error {
 	zd.commentLength = binary.LittleEndian.Uint16(buffer[20:22])
 	if zd.commentLength > 0 {
 		zd.comment = make([]byte, zd.commentLength)
-		_, err := zd.stream.Seek(offset+22, 0)
-		if err != nil {
-			return err
-		}
-		err = binary.Read(zd.stream, binary.LittleEndian, &zd.comment)
+		err := binary.Read(zd.stream, binary.LittleEndian, &zd.comment)
 		if err != nil {
 			return err
 		}
@@ -123,6 +119,9 @@ func (zd *ZipDir) readDirectory() error {
 	// buffer now contains the central directory
 	i := 0
 	for entry := 0; entry < int(zd.numEntries); entry++ {
+		if len(buffer) < i+46 {
+			return errors.New("central directory is malformed")
+		}
 		if buffer[i] != 0x50 || buffer[i+1] != 0x4b || buffer[i+2] != 0x01 || buffer[i+3] != 0x02 {
 			return errors.New("couldn't find central directory file header signature")
 		}
@@ -143,6 +142,9 @@ func (zd *ZipDir) readDirectory() error {
 		fh.internalAttr = binary.LittleEndian.Uint16(buffer[i+36 : i+38])
 		fh.externalAttr = binary.LittleEndian.Uint32(buffer[i+38 : i+42])
 		fh.offsetLocalHeader = binary.LittleEndian.Uint32(buffer[i+42 : i+46])
+		if len(buffer) < i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength) {
+			return errors.New("central directory is malformed")
+		}
 		fh.fileName = string(buffer[i+46 : i+46+int(fh.nameLength)])
 		if fh.extraLength > 0 {
 			fh.extraField = make([]byte, int(fh.extraLength))
