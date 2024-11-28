@@ -1,6 +1,8 @@
 package zip
 
 import (
+	"bytes"
+	"reflect"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -27,14 +29,18 @@ func TestReadDirectoryFailures(t *testing.T) {
 
 	for _, c := range testcases {
 		t.Run(c.name, func(t *testing.T) {
+			// Create test file
 			file, err := afero.TempFile(appFs, "", c.name)
 			if err != nil {
 				t.Fatalf("afero.TempFile returned error: %v", err)
 			}
+			defer file.Close()
 			_, err = file.Write(c.data)
 			if err != nil {
 				t.Fatalf("afero.Write returned error: %v", err)
 			}
+
+			// Make ZipDir
 			_, err = NewZipDir(c.name, file)
 			if err == nil && c.expectErr {
 				t.Errorf("NewZipDir should have returned error but didn't")
@@ -42,5 +48,124 @@ func TestReadDirectoryFailures(t *testing.T) {
 				t.Errorf("NewZipDir should not have returned error but did: %v", err)
 			}
 		})
+	}
+}
+
+func TestReadDirectory(t *testing.T) {
+	appFs := afero.NewMemMapFs()
+
+	name := "TestReadDirectory.zip"
+	data := []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xb9\x66\x7c\x59\x1c\x95\x68\xa6\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x62\x6f\x64\x79\x31\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xc3\x66\x7c\x59\xa6\xc4\x61\x3f\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x32\x2e\x74\x78\x74\x62\x6f\x64\x79\x32\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xc9\x66\x7c\x59\x30\xf4\x66\x48\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x33\x2e\x74\x78\x74\x62\x6f\x64\x79\x33\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\xb9\x66\x7c\x59\x1c\x95\x68\xa6\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x24\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x8b\xf4\x7a\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\xc3\x66\x7c\x59\xa6\xc4\x61\x3f\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x24\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x2c\x00\x00\x00\x66\x69\x6c\x65\x32\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\xf3\x7d\x84\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x32\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\xc9\x66\x7c\x59\x30\xf4\x66\x48\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x24\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x58\x00\x00\x00\x66\x69\x6c\x65\x33\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x01\xa5\x8b\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x33\x50\x4b\x05\x06\x00\x00\x00\x00\x03\x00\x03\x00\x3b\x01\x00\x00\x84\x00\x00\x00\x0e\x00\x41\x72\x63\x68\x69\x76\x65\x43\x6f\x6d\x6d\x65\x6e\x74")
+	numEntries := uint16(3)
+	commentLength := uint16(14)
+	comment := []byte("ArchiveComment")
+	centralDirOffset := uint32(132)
+	centralDirSize := uint32(315)
+	headers := []FileHeader{
+		{
+			versionMadeBy:     0x0014,
+			versionNeeded:     0x0014,
+			flags:             0x0000,
+			compressionMethod: 0x0000,
+			dosTime:           0x66b9,
+			dosDate:           0x597c,
+			crc:               0xa668951c,
+			compressedSize:    0x00000005,
+			uncompressedSize:  0x00000005,
+			nameLength:        0x0009,
+			extraLength:       0x0024,
+			commentLength:     0x000e,
+			internalAttr:      0x0001,
+			externalAttr:      0x00000020,
+			offsetLocalHeader: 0x00000000,
+			fileName:          "file1.txt",
+			comment:           "CommentOnFile1",
+			extraField:        []byte("\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x8b\xf4\x7a\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+		},
+		{
+			versionMadeBy:     0x0014,
+			versionNeeded:     0x0014,
+			flags:             0x0000,
+			compressionMethod: 0x0000,
+			dosTime:           0x66c3,
+			dosDate:           0x597c,
+			crc:               0x3f61c4a6,
+			compressedSize:    0x00000005,
+			uncompressedSize:  0x00000005,
+			nameLength:        0x0009,
+			extraLength:       0x0024,
+			commentLength:     0x000e,
+			internalAttr:      0x0001,
+			externalAttr:      0x00000020,
+			offsetLocalHeader: 0x0000002c,
+			fileName:          "file2.txt",
+			comment:           "CommentOnFile2",
+			extraField:        []byte("\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\xf3\x7d\x84\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+		},
+		{
+			versionMadeBy:     0x0014,
+			versionNeeded:     0x0014,
+			flags:             0x0000,
+			compressionMethod: 0x0000,
+			dosTime:           0x66c9,
+			dosDate:           0x597c,
+			crc:               0x4866f430,
+			compressedSize:    0x00000005,
+			uncompressedSize:  0x00000005,
+			nameLength:        0x0009,
+			extraLength:       0x0024,
+			commentLength:     0x000e,
+			internalAttr:      0x0001,
+			externalAttr:      0x00000020,
+			offsetLocalHeader: 0x00000058,
+			fileName:          "file3.txt",
+			comment:           "CommentOnFile3",
+			extraField:        []byte("\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x01\xa5\x8b\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+		},
+	}
+
+	// Create test file
+	file, err := afero.TempFile(appFs, "", name)
+	if err != nil {
+		t.Fatalf("afero.TempFile returned error: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("afero.TempFile returned error: %v", err)
+	}
+	defer file.Close()
+	_, err = file.Write(data)
+	if err != nil {
+		t.Fatalf("afero.Write returned error: %v", err)
+	}
+
+	// Make ZipDir
+	zd, err := NewZipDir(name, file)
+	if err != nil {
+		t.Fatalf("NewZipDir returned error: %v", err)
+	}
+
+	// Compare end of central directory record values
+	if zd.numEntries != numEntries {
+		t.Errorf("zd.numEntries = %d; want %d", zd.numEntries, numEntries)
+	}
+	if zd.commentLength != commentLength {
+		t.Errorf("zd.commentLength = %d; want %d", zd.commentLength, commentLength)
+	}
+	if !bytes.Equal(zd.comment, comment) {
+		t.Errorf("zd.comment = %q; want %q", zd.comment, comment)
+	}
+	if zd.centralDirOffset != centralDirOffset {
+		t.Errorf("zd.centralDirOffset = %d; want %d", zd.centralDirOffset, centralDirOffset)
+	}
+	if zd.centralDirSize != centralDirSize {
+		t.Errorf("zd.centralDirSize = %d; want %d", zd.centralDirSize, centralDirSize)
+	}
+
+	// Compare file headers in the central directory
+	if len(zd.fileHeaders) != len(headers) {
+		t.Errorf("len(zd.fileHeaders) = %d; want %d", len(zd.fileHeaders), len(headers))
+	}
+	if !reflect.DeepEqual(zd.fileHeaders, headers) {
+		t.Errorf("zd.fileHeaders:\n %v\nWant:\n%v", zd.fileHeaders, headers)
 	}
 }
