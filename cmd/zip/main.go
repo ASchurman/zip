@@ -9,12 +9,15 @@ import (
 )
 
 func main() {
-	table := flag.Bool("t", false, "display table of contents")
+	optTable := flag.Bool("t", false, "display table of contents")
+	optExtract := flag.Bool("x", false, "extract a file (or, if no file is specified, extract all files)")
+	optAdd := flag.Bool("r", false, "add a file to the zip file")
+	optDelete := flag.Bool("d", false, "delete a file from the zip file")
 	flag.Parse()
 	args := flag.Args()
 
-	if len(args) == 0 {
-		fmt.Println("Usage: go run main.go [-t] <zip file>")
+	if len(args) == 0 || flag.NFlag() != 1 {
+		fmt.Println("Usage: zip {-d|-r|-t|-x} ARCHIVE [FILE ...]")
 		return
 	}
 
@@ -29,7 +32,25 @@ func main() {
 	defer zf.Close()
 
 	// Do the desired operation
-	if *table {
+	if *optTable {
 		zf.Display(os.Stdout)
+	} else if *optExtract {
+		if len(args) > 1 {
+			for _, arg := range args[1:] {
+				panicOnError(zf.ExtractFile(arg))
+			}
+		} else {
+			panicOnError(zf.ExtractAll())
+		}
+	} else if *optAdd {
+		panic("Not implemented")
+	} else if *optDelete {
+		panic("Not implemented")
+	}
+}
+
+func panicOnError(err error) {
+	if err != nil {
+		panic(err)
 	}
 }

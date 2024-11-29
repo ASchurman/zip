@@ -7,34 +7,8 @@ import (
 	"io"
 	"math"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/afero"
-)
-
-// CompressionMethod is a uint16 corresponding to the compression method field
-// in a zip file.
-type CompressionMethod uint16
-
-const (
-	COMPRESS_STORED   = 0
-	COMPRESS_DEFLATED = 8
-)
-
-func compressionMethodToString(method CompressionMethod) string {
-	switch method {
-	case COMPRESS_STORED:
-		return "stored"
-	case COMPRESS_DEFLATED:
-		return "deflated"
-	default:
-		return fmt.Sprintf("%d", method)
-	}
-}
-
-const (
-	// If we have no files, then we only have end-of-central-dir record
-	CENTRAL_DIR_MIN_SIZE = 22
 )
 
 // File represents a zip file. It contains fields for I/O (fs, name, file),
@@ -43,19 +17,19 @@ const (
 // of file headers from the central directory (fileHeaders).
 type File struct {
 	fs               afero.Fs     // Use afero for the sake of testing
-	name             string       // zip file name
+	Name             string       // zip file name
 	file             afero.File   // file handle for the archive
 	numEntries       uint16       // number of entries in the central directory
 	centralDirSize   uint32       // size of the central directory
 	centralDirOffset uint32       // offset of the central directory, relative to the start of the file
 	commentLength    uint16       // length of the zip file comment
 	comment          []byte       // zip file comment
-	fileHeaders      []FileHeader // file headers from the central directory
+	fileHeaders      []fileHeader // file headers from the central directory
 }
 
 // FileHeader represents a file header from the zip file's central directory. Each field
 // corresponds to a field in the zip file's central directory file header.
-type FileHeader struct {
+type fileHeader struct {
 	versionMadeBy     uint16
 	versionNeeded     uint16
 	flags             uint16
@@ -76,28 +50,12 @@ type FileHeader struct {
 	comment           string
 }
 
-type ZipError struct {
-	Operation string
-	Err       error
-}
-
-func (e *ZipError) Error() string {
-	return fmt.Sprintf("%s: %s", e.Operation, e.Err.Error())
-}
-
-func newZipError(operation string, err error) *ZipError {
-	return &ZipError{Operation: operation, Err: err}
-}
-func newZipErrorStr(operation string, errStr string) *ZipError {
-	return &ZipError{Operation: operation, Err: errors.New(errStr)}
-}
-
 func Create(archiveName string, fileName string, method CompressionMethod) (*File, error) {
 	return CreateWithFs(archiveName, fileName, method, afero.NewOsFs())
 }
 
 func CreateWithFs(archiveName string, fileName string, method CompressionMethod, fs afero.Fs) (*File, error) {
-	zf := File{name: archiveName, fs: fs}
+	zf := File{Name: archiveName, fs: fs}
 	file, err := zf.fs.Create(archiveName)
 	if err != nil {
 		return nil, err
@@ -123,7 +81,7 @@ func Open(name string) (*File, error) {
 // that can be used to interact with the zip file. The given afero.Fs is used instead
 // of the default os file system.
 func OpenWithFs(name string, fs afero.Fs) (*File, error) {
-	zf := File{name: name, fs: fs}
+	zf := File{Name: name, fs: fs}
 	file, err := zf.fs.Open(name)
 	if err != nil {
 		return nil, err
@@ -209,7 +167,7 @@ func (zf *File) readDirectory() error {
 		if buffer[i] != 0x50 || buffer[i+1] != 0x4b || buffer[i+2] != 0x01 || buffer[i+3] != 0x02 {
 			return newZipErrorStr("Read Directory", "couldn't find central directory file header signature")
 		}
-		fh := FileHeader{}
+		fh := fileHeader{}
 		fh.versionMadeBy = binary.LittleEndian.Uint16(buffer[i+4 : i+6])
 		fh.versionNeeded = binary.LittleEndian.Uint16(buffer[i+6 : i+8])
 		fh.flags = binary.LittleEndian.Uint16(buffer[i+8 : i+10])
@@ -244,13 +202,17 @@ func (zf *File) readDirectory() error {
 	// Don't bother reading the local file headers to make sure that the central directory
 	// is valid. Do that lazily, when we actually need to look at the local file headers.
 
+	// TODO maybe check the local file headers here, actually. For the caller, it makes
+	// the most sense to get an error when you first try to open a bad zip file, vs
+	// when you try to extract a file from it.
+
 	return nil
 }
 
 // Display prints out a table of contents for the zip file to the given Writer.
 // The table of contents format is similar to the "unzip -v" command.
 func (zf *File) Display(output io.Writer) {
-	fmt.Printf("Archive: %s\n", zf.name)
+	fmt.Printf("Archive: %s\n", zf.Name)
 	if zf.commentLength > 0 {
 		fmt.Printf("Comment: %s\n", zf.comment)
 	}
@@ -277,33 +239,97 @@ func (zf *File) Display(output io.Writer) {
 	w.Flush()
 }
 
-func dosToTime(dosDate uint16, dosTime uint16) time.Time {
-	sec := dosTime & 0x1f
-	min := (dosTime >> 5) & 0x3f
-	hr := (dosTime >> 11) & 0x1f
-	day := dosDate & 0x1f
-	month := (dosDate >> 5) & 0xf
-	year := (dosDate >> 9) & 0x7f
-
-	return time.Date(int(year)+1980, time.Month(month), int(day), int(hr), int(min), int(sec), 0, time.Local)
-}
-
-func (fh *FileHeader) getDateTime() time.Time {
-	return dosToTime(fh.dosDate, fh.dosTime)
-}
-
 func (zf *File) AddFile(name string, method CompressionMethod) error {
+	if method == COMPRESS_DEFLATED {
+		return errors.New("deflate not implemented")
+	}
+
+	// Make a temp file to write the new zip contents into
+
+	// Traverse the current file, copying it to the temp file unless it's the file we're adding.
+
+	// Update metadata with the new file
+
+	// Write the new file we're adding
+
+	// Write the central directory
+
+	// Clean-up:
+	// Close the temp file, close and delete zf.file, rename the temp file,
+	// replace zf.file with the renamed temp file, and reopen it.
+
 	return errors.New("not implemented")
 }
 
 func (zf *File) RemoveFile(name string) error {
+	// Make a temp file to write the new zip contents into
+
+	// Traverse the current file, copying it to the temp file unless it's the file we're removing.
+
+	// Update metadata with the removed file
+
+	// Write the central directory
+
+	// Clean-up:
+	// Close the temp file, close and delete zf.file, rename the temp file,
+	// replace zf.file with the renamed temp file, and reopen it.
+
 	return errors.New("not implemented")
 }
 
 func (zf *File) ExtractFile(name string) error {
-	return errors.New("not implemented")
+	for _, fh := range zf.fileHeaders {
+		if fh.fileName == name {
+			return zf.extractSingleFile(&fh)
+		}
+	}
+	return errors.New("file not found")
 }
 
 func (zf *File) ExtractAll() error {
-	return errors.New("not implemented")
+	for _, fh := range zf.fileHeaders {
+		err := zf.extractSingleFile(&fh)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (zf *File) extractSingleFile(fh *fileHeader) error {
+	if fh.compressionMethod == COMPRESS_DEFLATED {
+		return errors.New("deflate not implemented")
+	}
+
+	// read extra field length so that we can seek to the file data
+	_, err := zf.file.Seek(int64(fh.offsetLocalHeader+28), io.SeekStart)
+	if err != nil {
+		return err
+	}
+	var extraFieldLength uint16
+	err = binary.Read(zf.file, binary.LittleEndian, &extraFieldLength)
+	if err != nil {
+		return err
+	}
+
+	// seek past file name and extra field to get to file data
+	offsetFromCurrent := fh.nameLength + extraFieldLength
+	_, err = zf.file.Seek(int64(offsetFromCurrent), io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+
+	// file pointer is now at the start of the file data. Read fh.compressedSize bytes from
+	// zf.file and write them to outfile.
+	outfileTempName := tempName(fh.fileName)
+	outfile, err := zf.fs.Create(outfileTempName)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(outfile, io.LimitReader(zf.file, int64(fh.compressedSize)))
+	if err != nil {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return err
+	}
+	return zf.closeAndRenameTempFile(outfile, outfileTempName, fh.fileName)
 }

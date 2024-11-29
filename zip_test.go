@@ -67,7 +67,7 @@ func TestReadDirectory(t *testing.T) {
 	comment := []byte("ArchiveComment")
 	centralDirOffset := uint32(132)
 	centralDirSize := uint32(315)
-	headers := []FileHeader{
+	headers := []fileHeader{
 		{
 			versionMadeBy:     0x0014,
 			versionNeeded:     0x0014,
