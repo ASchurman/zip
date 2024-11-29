@@ -158,7 +158,7 @@ func (zf *File) readDirectory() error {
 	if err != nil {
 		return newZipError("Read Directory", err)
 	}
-	// buffer now contains the central directory
+	// buffer now contains the central directory. Read it into zf.fileHeaders
 	i := 0
 	for entry := 0; entry < int(zf.numEntries); entry++ {
 		if len(buffer) < i+46 {
@@ -331,5 +331,18 @@ func (zf *File) extractSingleFile(fh *fileHeader) error {
 		zf.closeAndDeleteTempFile(outfile, outfileTempName)
 		return err
 	}
+
+	// Check the CRC
+	crcValid, err := checkCrc(fh.crc, outfile)
+	if err != nil {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return err
+	}
+	if !crcValid {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return errors.New("CRC mismatch")
+	}
+
+	// End by closing outfile and renaming it from its temporary name to the original file name
 	return zf.closeAndRenameTempFile(outfile, outfileTempName, fh.fileName)
 }

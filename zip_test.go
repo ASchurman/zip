@@ -8,6 +8,22 @@ import (
 	"github.com/spf13/afero"
 )
 
+func makeTestFile(fs afero.Fs, name string, data []byte) error {
+	file, err := fs.Create(name)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	if err != nil {
+		return err
+	}
+	err = file.Close()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func TestReadDirectoryFailures(t *testing.T) {
 	appFs := afero.NewMemMapFs()
 	var testcases = []struct {
@@ -30,17 +46,9 @@ func TestReadDirectoryFailures(t *testing.T) {
 	for _, c := range testcases {
 		t.Run(c.name, func(t *testing.T) {
 			// Create test file
-			file, err := appFs.Create(c.name)
+			err := makeTestFile(appFs, c.name, c.data)
 			if err != nil {
-				t.Fatalf("afero.Create returned error: %v", err)
-			}
-			_, err = file.Write(c.data)
-			if err != nil {
-				t.Fatalf("afero.Write returned error: %v", err)
-			}
-			err = file.Close()
-			if err != nil {
-				t.Fatalf("afero.Close returned error: %v", err)
+				t.Fatalf("makeTestFile returned error: %v", err)
 			}
 
 			// Make ZipDir
@@ -170,5 +178,60 @@ func TestReadDirectory(t *testing.T) {
 	}
 	if !reflect.DeepEqual(zf.fileHeaders, headers) {
 		t.Errorf("zf.fileHeaders:\n %v\nWant:\n%v", zf.fileHeaders, headers)
+	}
+}
+
+func TestExtract(t *testing.T) {
+	appFs := afero.NewMemMapFs()
+
+	file1Name := "file1.txt"
+	file1Data := []byte("test data 1")
+
+	var testcases = []struct {
+		testName  string
+		expectErr bool
+		fileName  string
+		fileData  []byte
+		zipData   []byte
+	}{
+		{"WellFormed", false, file1Name, file1Data, []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x74\x65\x73\x74\x20\x64\x61\x74\x61\x20\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x32\x00\x00\x00\x00\x00")},
+		{"BadExtraField", true, file1Name, file1Data, []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x01\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x74\x65\x73\x74\x20\x64\x61\x74\x61\x20\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x32\x00\x00\x00\x00\x00")},
+		{"BadCRC", true, file1Name, file1Data, []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\xff\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x74\x65\x73\x74\x20\x64\x61\x74\x61\x20\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\xff\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x32\x00\x00\x00\x00\x00")},
+	}
+
+	for _, c := range testcases {
+		t.Run(c.testName, func(t *testing.T) {
+			// Create test zip file
+			err := makeTestFile(appFs, c.testName, c.zipData)
+			if err != nil {
+				t.Errorf("makeTestFile returned error: %v", err)
+			}
+
+			// Open the test zip file
+			zf, err := OpenWithFs(c.testName, appFs)
+			if err != nil {
+				t.Errorf("OpenWithFs returned error: %v", err)
+			}
+			if zf == nil {
+				t.Errorf("OpenWithFs returned nil without having an error")
+			}
+
+			// Extract file
+			err = zf.ExtractFile(c.fileName)
+			if c.expectErr && err == nil {
+				t.Errorf("ExtractFile should have failed, but didn't")
+			} else if !c.expectErr && err != nil {
+				t.Errorf("ExtractFile should have succeeded, but failed: %v", err)
+			}
+
+			// Compare file data
+			data, err := afero.ReadFile(appFs, c.fileName)
+			if err != nil {
+				t.Errorf("afero.ReadFile returned error: %v", err)
+			}
+			if !bytes.Equal(data, c.fileData) {
+				t.Errorf("afero.ReadFile returned: \"%q\"; Want: \"%q\"", data, c.fileData)
+			}
+		})
 	}
 }

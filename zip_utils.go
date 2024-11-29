@@ -3,6 +3,8 @@ package zip
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"time"
 
 	"github.com/spf13/afero"
@@ -84,4 +86,24 @@ func (zf *File) closeAndRenameTempFile(file afero.File, tempName string, name st
 		return err
 	}
 	return zf.fs.Rename(tempName, name) // Will replace any file with the same name!
+}
+
+func checkCrc(crc uint32, file afero.File) (bool, error) {
+	// TODO there's surely a better way to do this beside reading the whole file into memory
+	_, err := file.Seek(0, io.SeekStart)
+	if err != nil {
+		return false, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	data := make([]byte, info.Size())
+	_, err = file.Read(data)
+	if err != nil {
+		return false, err
+	}
+	fileCrc := crc32.ChecksumIEEE(data)
+
+	return crc == fileCrc, nil
 }
