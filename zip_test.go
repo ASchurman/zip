@@ -30,22 +30,28 @@ func TestReadDirectoryFailures(t *testing.T) {
 	for _, c := range testcases {
 		t.Run(c.name, func(t *testing.T) {
 			// Create test file
-			file, err := afero.TempFile(appFs, "", c.name)
+			file, err := appFs.Create(c.name)
 			if err != nil {
-				t.Fatalf("afero.TempFile returned error: %v", err)
+				t.Fatalf("afero.Create returned error: %v", err)
 			}
-			defer file.Close()
 			_, err = file.Write(c.data)
 			if err != nil {
 				t.Fatalf("afero.Write returned error: %v", err)
 			}
+			err = file.Close()
+			if err != nil {
+				t.Fatalf("afero.Close returned error: %v", err)
+			}
 
 			// Make ZipDir
-			_, err = NewZipDir(c.name, file)
+			zf, err := OpenWithFs(c.name, appFs)
 			if err == nil && c.expectErr {
 				t.Errorf("NewZipDir should have returned error but didn't")
 			} else if err != nil && !c.expectErr {
 				t.Errorf("NewZipDir should not have returned error but did: %v", err)
+			}
+			if err == nil {
+				zf.Close()
 			}
 		})
 	}
@@ -125,47 +131,44 @@ func TestReadDirectory(t *testing.T) {
 	}
 
 	// Create test file
-	file, err := afero.TempFile(appFs, "", name)
+	file, err := appFs.Create(name)
 	if err != nil {
-		t.Fatalf("afero.TempFile returned error: %v", err)
+		t.Fatalf("afero.Create returned error: %v", err)
 	}
-	if err != nil {
-		t.Fatalf("afero.TempFile returned error: %v", err)
-	}
-	defer file.Close()
 	_, err = file.Write(data)
 	if err != nil {
 		t.Fatalf("afero.Write returned error: %v", err)
 	}
+	file.Close()
 
-	// Make ZipDir
-	zd, err := NewZipDir(name, file)
+	// Open zip File
+	zf, err := OpenWithFs(name, appFs)
 	if err != nil {
-		t.Fatalf("NewZipDir returned error: %v", err)
+		t.Fatalf("OpenWithFs returned error: %v", err)
 	}
 
 	// Compare end of central directory record values
-	if zd.numEntries != numEntries {
-		t.Errorf("zd.numEntries = %d; want %d", zd.numEntries, numEntries)
+	if zf.numEntries != numEntries {
+		t.Errorf("zf.numEntries = %d; want %d", zf.numEntries, numEntries)
 	}
-	if zd.commentLength != commentLength {
-		t.Errorf("zd.commentLength = %d; want %d", zd.commentLength, commentLength)
+	if zf.commentLength != commentLength {
+		t.Errorf("zf.commentLength = %d; want %d", zf.commentLength, commentLength)
 	}
-	if !bytes.Equal(zd.comment, comment) {
-		t.Errorf("zd.comment = %q; want %q", zd.comment, comment)
+	if !bytes.Equal(zf.comment, comment) {
+		t.Errorf("zf.comment = %q; want %q", zf.comment, comment)
 	}
-	if zd.centralDirOffset != centralDirOffset {
-		t.Errorf("zd.centralDirOffset = %d; want %d", zd.centralDirOffset, centralDirOffset)
+	if zf.centralDirOffset != centralDirOffset {
+		t.Errorf("zf.centralDirOffset = %d; want %d", zf.centralDirOffset, centralDirOffset)
 	}
-	if zd.centralDirSize != centralDirSize {
-		t.Errorf("zd.centralDirSize = %d; want %d", zd.centralDirSize, centralDirSize)
+	if zf.centralDirSize != centralDirSize {
+		t.Errorf("zf.centralDirSize = %d; want %d", zf.centralDirSize, centralDirSize)
 	}
 
 	// Compare file headers in the central directory
-	if len(zd.fileHeaders) != len(headers) {
-		t.Errorf("len(zd.fileHeaders) = %d; want %d", len(zd.fileHeaders), len(headers))
+	if len(zf.fileHeaders) != len(headers) {
+		t.Errorf("len(zf.fileHeaders) = %d; want %d", len(zf.fileHeaders), len(headers))
 	}
-	if !reflect.DeepEqual(zd.fileHeaders, headers) {
-		t.Errorf("zd.fileHeaders:\n %v\nWant:\n%v", zd.fileHeaders, headers)
+	if !reflect.DeepEqual(zf.fileHeaders, headers) {
+		t.Errorf("zf.fileHeaders:\n %v\nWant:\n%v", zf.fileHeaders, headers)
 	}
 }

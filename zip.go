@@ -8,19 +8,53 @@ import (
 	"math"
 	"text/tabwriter"
 	"time"
+
+	"github.com/spf13/afero"
 )
 
-type ZipDir struct {
-	name             string
-	stream           io.ReadWriteSeeker
-	numEntries       uint16 // number of entries in the central directory
-	commentLength    uint16
-	comment          []byte
-	fileHeaders      []FileHeader
-	centralDirOffset uint32
-	centralDirSize   uint32
+// CompressionMethod is a uint16 corresponding to the compression method field
+// in a zip file.
+type CompressionMethod uint16
+
+const (
+	COMPRESS_STORED   = 0
+	COMPRESS_DEFLATED = 8
+)
+
+func compressionMethodToString(method CompressionMethod) string {
+	switch method {
+	case COMPRESS_STORED:
+		return "stored"
+	case COMPRESS_DEFLATED:
+		return "deflated"
+	default:
+		return fmt.Sprintf("%d", method)
+	}
 }
 
+const (
+	// If we have no files, then we only have end-of-central-dir record
+	CENTRAL_DIR_MIN_SIZE = 22
+)
+
+// File represents a zip file. It contains fields for I/O (fs, name, file),
+// fields corresponding to the end-of-central-directory record (numEntries,
+// centralDirSize, centralDirOffset, commentLength, comment), and a slice
+// of file headers from the central directory (fileHeaders).
+type File struct {
+	fs               afero.Fs     // Use afero for the sake of testing
+	name             string       // zip file name
+	file             afero.File   // file handle for the archive
+	numEntries       uint16       // number of entries in the central directory
+	centralDirSize   uint32       // size of the central directory
+	centralDirOffset uint32       // offset of the central directory, relative to the start of the file
+	commentLength    uint16       // length of the zip file comment
+	comment          []byte       // zip file comment
+	fileHeaders      []FileHeader // file headers from the central directory
+}
+
+// FileHeader represents a file header from the zip file's central directory. Each field
+// corresponds to a field in the zip file's central directory file header.
 type FileHeader struct {
 	versionMadeBy     uint16
 	versionNeeded     uint16
@@ -42,31 +76,81 @@ type FileHeader struct {
 	comment           string
 }
 
-func dosToTime(dosDate uint16, dosTime uint16) time.Time {
-	sec := dosTime & 0x1f
-	min := (dosTime >> 5) & 0x3f
-	hr := (dosTime >> 11) & 0x1f
-	day := dosDate & 0x1f
-	month := (dosDate >> 5) & 0xf
-	year := (dosDate >> 9) & 0x7f
-
-	return time.Date(int(year)+1980, time.Month(month), int(day), int(hr), int(min), int(sec), 0, time.Local)
+type ZipError struct {
+	Operation string
+	Err       error
 }
 
-func (fh *FileHeader) getDateTime() time.Time {
-	return dosToTime(fh.dosDate, fh.dosTime)
+func (e *ZipError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Operation, e.Err.Error())
 }
 
-func NewZipDir(name string, stream io.ReadWriteSeeker) (*ZipDir, error) {
-	zd := ZipDir{name: name, stream: stream}
-	err := zd.readDirectory()
+func newZipError(operation string, err error) *ZipError {
+	return &ZipError{Operation: operation, Err: err}
+}
+func newZipErrorStr(operation string, errStr string) *ZipError {
+	return &ZipError{Operation: operation, Err: errors.New(errStr)}
+}
+
+func Create(archiveName string, fileName string, method CompressionMethod) (*File, error) {
+	return CreateWithFs(archiveName, fileName, method, afero.NewOsFs())
+}
+
+func CreateWithFs(archiveName string, fileName string, method CompressionMethod, fs afero.Fs) (*File, error) {
+	zf := File{name: archiveName, fs: fs}
+	file, err := zf.fs.Create(archiveName)
 	if err != nil {
 		return nil, err
 	}
-	return &zd, nil
+
+	zf.file = file
+	zf.numEntries = 0
+	zf.commentLength = 0
+	zf.centralDirSize = CENTRAL_DIR_MIN_SIZE
+	zf.centralDirOffset = 0
+
+	err = zf.AddFile(fileName, method)
+	return &zf, err
 }
 
-func (zd *ZipDir) readDirectory() error {
+// Open opens an existing zip file with the given name and returns a zip.File
+// that can be used to interact with the zip file.
+func Open(name string) (*File, error) {
+	return OpenWithFs(name, afero.NewOsFs())
+}
+
+// OpenWithFs opens an existing zip file with the given name and returns a zip.File
+// that can be used to interact with the zip file. The given afero.Fs is used instead
+// of the default os file system.
+func OpenWithFs(name string, fs afero.Fs) (*File, error) {
+	zf := File{name: name, fs: fs}
+	file, err := zf.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	zf.file = file
+
+	err = zf.readDirectory()
+	if err != nil {
+		return nil, err
+	}
+	return &zf, nil
+}
+
+// Close closes the underlying file associated with the zip.File.
+// It returns an error if the file cannot be closed.
+func (zf *File) Close() error {
+	return zf.file.Close()
+}
+
+// readDirectory reads the central directory of a zip file to populate the
+// File struct with metadata about the archive's contents. It seeks from the
+// end of the file to locate the end-of-central-directory signature, reads
+// the central directory records, and extracts file headers into a slice.
+// It also handles reading the archive's comment if present. Errors are
+// returned if the directory signature cannot be found or if the directory
+// structure is malformed.
+func (zf *File) readDirectory() error {
 	// Start at the end of the file and look for the end of central directory signature
 	// End of central directory is record is 22 bytes plus the zip file comment.
 	// Start at EOF-22 and go backwards, looking for the end of central directory signature.
@@ -74,13 +158,13 @@ func (zd *ZipDir) readDirectory() error {
 	buffer := make([]byte, 22)
 	offset := int64(-22) // offset is measured from the end of the stream
 	for ; !found; offset-- {
-		pos, err := zd.stream.Seek(offset, io.SeekEnd)
+		pos, err := zf.file.Seek(offset, io.SeekEnd)
 		if err != nil || pos < 0 {
-			return errors.New("couldn't find end of directory signature (seek failed)")
+			return newZipErrorStr("Read Directory", "couldn't find end of directory signature")
 		}
-		err = binary.Read(zd.stream, binary.LittleEndian, &buffer)
+		err = binary.Read(zf.file, binary.LittleEndian, &buffer)
 		if err != nil {
-			return err
+			return newZipError("Read Directory", err)
 		}
 		if buffer[0] == 0x50 && buffer[1] == 0x4b && buffer[2] == 0x05 && buffer[3] == 0x06 {
 			found = true
@@ -88,42 +172,42 @@ func (zd *ZipDir) readDirectory() error {
 		}
 	}
 	if !found {
-		return errors.New("couldn't find end of central directory signature")
+		return newZipErrorStr("Read Directory", "couldn't find end of central directory signature")
 	}
 
 	// buffer contains 22 bytes of the end of central directory record, starting from signature.
 	// Now read the rest of the end of central directory record.
 	// Ignore anything involving a directory spanning multiple disks...
-	zd.numEntries = binary.LittleEndian.Uint16(buffer[10:12])
-	zd.centralDirSize = binary.LittleEndian.Uint32(buffer[12:16])
-	zd.centralDirOffset = binary.LittleEndian.Uint32(buffer[16:20])
-	zd.commentLength = binary.LittleEndian.Uint16(buffer[20:22])
-	if zd.commentLength > 0 {
-		zd.comment = make([]byte, zd.commentLength)
-		err := binary.Read(zd.stream, binary.LittleEndian, &zd.comment)
+	zf.numEntries = binary.LittleEndian.Uint16(buffer[10:12])
+	zf.centralDirSize = binary.LittleEndian.Uint32(buffer[12:16])
+	zf.centralDirOffset = binary.LittleEndian.Uint32(buffer[16:20])
+	zf.commentLength = binary.LittleEndian.Uint16(buffer[20:22])
+	if zf.commentLength > 0 {
+		zf.comment = make([]byte, zf.commentLength)
+		err := binary.Read(zf.file, binary.LittleEndian, &zf.comment)
 		if err != nil {
-			return err
+			return newZipError("Read Directory", err)
 		}
 	}
 
 	// Read the central directory
-	buffer = make([]byte, zd.centralDirSize)
-	_, err := zd.stream.Seek(int64(zd.centralDirOffset), 0)
+	buffer = make([]byte, zf.centralDirSize)
+	_, err := zf.file.Seek(int64(zf.centralDirOffset), 0)
 	if err != nil {
-		return err
+		return newZipError("Read Directory", err)
 	}
-	err = binary.Read(zd.stream, binary.LittleEndian, &buffer)
+	err = binary.Read(zf.file, binary.LittleEndian, &buffer)
 	if err != nil {
-		return err
+		return newZipError("Read Directory", err)
 	}
 	// buffer now contains the central directory
 	i := 0
-	for entry := 0; entry < int(zd.numEntries); entry++ {
+	for entry := 0; entry < int(zf.numEntries); entry++ {
 		if len(buffer) < i+46 {
-			return errors.New("central directory is malformed")
+			return newZipErrorStr("Read Directory", "central directory is malformed")
 		}
 		if buffer[i] != 0x50 || buffer[i+1] != 0x4b || buffer[i+2] != 0x01 || buffer[i+3] != 0x02 {
-			return errors.New("couldn't find central directory file header signature")
+			return newZipErrorStr("Read Directory", "couldn't find central directory file header signature")
 		}
 		fh := FileHeader{}
 		fh.versionMadeBy = binary.LittleEndian.Uint16(buffer[i+4 : i+6])
@@ -143,7 +227,7 @@ func (zd *ZipDir) readDirectory() error {
 		fh.externalAttr = binary.LittleEndian.Uint32(buffer[i+38 : i+42])
 		fh.offsetLocalHeader = binary.LittleEndian.Uint32(buffer[i+42 : i+46])
 		if len(buffer) < i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength) {
-			return errors.New("central directory is malformed")
+			return newZipErrorStr("Read Directory", "central directory is malformed")
 		}
 		fh.fileName = string(buffer[i+46 : i+46+int(fh.nameLength)])
 		if fh.extraLength > 0 {
@@ -153,7 +237,7 @@ func (zd *ZipDir) readDirectory() error {
 		if fh.commentLength > 0 {
 			fh.comment = string(buffer[i+46+int(fh.nameLength)+int(fh.extraLength) : i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength)])
 		}
-		zd.fileHeaders = append(zd.fileHeaders, fh)
+		zf.fileHeaders = append(zf.fileHeaders, fh)
 		i += 46 + int(fh.nameLength) + int(fh.extraLength) + int(fh.commentLength)
 	}
 
@@ -163,10 +247,12 @@ func (zd *ZipDir) readDirectory() error {
 	return nil
 }
 
-func (zd *ZipDir) Display(output io.Writer) {
-	fmt.Printf("Archive: %s\n", zd.name)
-	if zd.commentLength > 0 {
-		fmt.Printf("Comment: %s\n", zd.comment)
+// Display prints out a table of contents for the zip file to the given Writer.
+// The table of contents format is similar to the "unzip -v" command.
+func (zf *File) Display(output io.Writer) {
+	fmt.Printf("Archive: %s\n", zf.name)
+	if zf.commentLength > 0 {
+		fmt.Printf("Comment: %s\n", zf.comment)
 	}
 
 	w := new(tabwriter.Writer)
@@ -175,12 +261,12 @@ func (zd *ZipDir) Display(output io.Writer) {
 	fmt.Fprintln(w, "Length\tMethod\tSize\tCmpr\tDate\tTime\tCRC-32\tName\t")
 	fmt.Fprintln(w, "------\t------\t------\t------\t------\t------\t------\t------\t")
 
-	for _, fh := range zd.fileHeaders {
+	for _, fh := range zf.fileHeaders {
 		compressedPercent := int(math.Floor(float64(fh.compressedSize) / float64(fh.uncompressedSize) * 100))
 		dt := fh.getDateTime()
 		fmt.Fprintf(w, "%d\t%s\t%d\t%d%%\t%s\t%s\t%x\t%s\t\n",
 			fh.uncompressedSize,
-			compressionMethodToString(fh.compressionMethod),
+			compressionMethodToString(CompressionMethod(fh.compressionMethod)),
 			fh.compressedSize,
 			compressedPercent,
 			dt.Format("2006-01-02"),
@@ -191,13 +277,33 @@ func (zd *ZipDir) Display(output io.Writer) {
 	w.Flush()
 }
 
-func compressionMethodToString(compressionMethod uint16) string {
-	switch compressionMethod {
-	case 0:
-		return "stored"
-	case 8:
-		return "deflated"
-	default:
-		return fmt.Sprintf("%d", compressionMethod)
-	}
+func dosToTime(dosDate uint16, dosTime uint16) time.Time {
+	sec := dosTime & 0x1f
+	min := (dosTime >> 5) & 0x3f
+	hr := (dosTime >> 11) & 0x1f
+	day := dosDate & 0x1f
+	month := (dosDate >> 5) & 0xf
+	year := (dosDate >> 9) & 0x7f
+
+	return time.Date(int(year)+1980, time.Month(month), int(day), int(hr), int(min), int(sec), 0, time.Local)
+}
+
+func (fh *FileHeader) getDateTime() time.Time {
+	return dosToTime(fh.dosDate, fh.dosTime)
+}
+
+func (zf *File) AddFile(name string, method CompressionMethod) error {
+	return errors.New("not implemented")
+}
+
+func (zf *File) RemoveFile(name string) error {
+	return errors.New("not implemented")
+}
+
+func (zf *File) ExtractFile(name string) error {
+	return errors.New("not implemented")
+}
+
+func (zf *File) ExtractAll() error {
+	return errors.New("not implemented")
 }

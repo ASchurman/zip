@@ -18,21 +18,18 @@ func main() {
 		return
 	}
 
-	file, err := os.Open(args[0])
+	// Open zip file
+	zf, err := zip.Open(args[0])
 	if err != nil {
 		panic(err)
 	}
-	defer file.Close()
-
-	zd, err := zip.NewZipDir(args[0], file)
-	if err != nil {
-		panic(err)
-	}
-	if zd == nil {
+	if zf == nil {
 		panic("NewZipDir returned nil without having an error")
 	}
+	defer zf.Close()
 
+	// Do the desired operation
 	if *table {
-		zd.Display(os.Stdout)
+		zf.Display(os.Stdout)
 	}
 }
