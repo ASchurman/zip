@@ -2,6 +2,8 @@ package zip
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"reflect"
 	"testing"
 
@@ -22,6 +24,101 @@ func makeTestFile(fs afero.Fs, name string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// Make a zip file with a single entry stored (not deflated) in it
+func makeTestZipStore(fs afero.Fs,
+	zipName string,
+	fileName string,
+	fileData []byte,
+	zipComment string,
+	fileComment string) error {
+
+	fileCrc := crc32.ChecksumIEEE(fileData)
+	fileCrcBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(fileCrcBytes, fileCrc)
+
+	fileSize := uint32(len(fileData))
+	fileSizeBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(fileSizeBytes, fileSize)
+
+	fileNameLength := uint16(len(fileName))
+	fileNameLengthBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(fileNameLengthBytes, fileNameLength)
+
+	fileCommentLength := uint16(len(fileComment))
+	fileCommentLengthBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(fileCommentLengthBytes, fileCommentLength)
+
+	fileHeaderAndData := []byte{
+		0x50, 0x4b, 0x03, 0x04, // local file header
+		0x14, 0x00, // version to extract
+		0x00, 0x00, // flags
+		0x00, 0x00, // compression method
+		0xc7, 0x46, // time
+		0x7e, 0x59, // date
+		fileCrcBytes[0], fileCrcBytes[1], fileCrcBytes[2], fileCrcBytes[3], // crc
+		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // compressed size
+		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // uncompressed size
+		fileNameLengthBytes[0], fileNameLengthBytes[1], // file name length
+		0x00, 0x00, // extra field length
+	}
+
+	fileHeaderAndData = append(fileHeaderAndData, fileName...)
+	fileHeaderAndData = append(fileHeaderAndData, fileData...)
+
+	centralDirectory := []byte{
+		0x50, 0x4b, 0x01, 0x02, // signature
+		0x14, 0x00, // version made by
+		0x14, 0x00, // version to extract
+		0x00, 0x00, // flags
+		0x00, 0x00, // compression method
+		0xc7, 0x46, // time
+		0x7e, 0x59, // date
+		fileCrcBytes[0], fileCrcBytes[1], fileCrcBytes[2], fileCrcBytes[3], // crc
+		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // compressed size
+		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // uncompressed size
+		fileNameLengthBytes[0], fileNameLengthBytes[1], // file name length
+		0x00, 0x00, // extra field length
+		fileCommentLengthBytes[0], fileCommentLengthBytes[1], // file comment length
+		0x00, 0x00, // disk # start
+		0x01, 0x00, // internal file attributes
+		0x20, 0x00, 0x00, 0x00, // external file attributes
+		0x00, 0x00, 0x00, 0x00, // offset of local header
+	}
+
+	centralDirectory = append(centralDirectory, fileName...)
+	centralDirectory = append(centralDirectory, fileComment...)
+
+	centralDirSize := uint32(len(centralDirectory))
+	centralDirSizeBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(centralDirSizeBytes, centralDirSize)
+
+	centralDirOffset := uint32(len(fileHeaderAndData))
+	centralDirOffsetBytes := make([]byte, 4)
+	binary.LittleEndian.PutUint32(centralDirOffsetBytes, centralDirOffset)
+
+	zipCommentLength := uint16(len(zipComment))
+	zipCommentLengthBytes := make([]byte, 2)
+	binary.LittleEndian.PutUint16(zipCommentLengthBytes, zipCommentLength)
+
+	endOfCentralDirectory := []byte{
+		0x50, 0x4b, 0x05, 0x06, // signature
+		0x00, 0x00, // number of this disk
+		0x00, 0x00, // number of the disk with the start of the central directory
+		0x01, 0x00, // total number of entries in the central directory on this disk
+		0x01, 0x00, // total number of entries in the central directory
+		centralDirSizeBytes[0], centralDirSizeBytes[1], centralDirSizeBytes[2], centralDirSizeBytes[3], // size of the central directory
+		centralDirOffsetBytes[0], centralDirOffsetBytes[1], centralDirOffsetBytes[2], centralDirOffsetBytes[3], // offset of start of central directory
+		zipCommentLengthBytes[0], zipCommentLengthBytes[1], // zip file comment length
+	}
+
+	endOfCentralDirectory = append(endOfCentralDirectory, zipComment...)
+
+	zipData := append(fileHeaderAndData, centralDirectory...)
+	zipData = append(zipData, endOfCentralDirectory...)
+
+	return makeTestFile(fs, zipName, zipData)
 }
 
 func TestReadDirectoryFailures(t *testing.T) {
@@ -69,72 +166,72 @@ func TestReadDirectory(t *testing.T) {
 	appFs := afero.NewMemMapFs()
 
 	name := "TestReadDirectory.zip"
-	data := []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xb9\x66\x7c\x59\x1c\x95\x68\xa6\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x62\x6f\x64\x79\x31\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xc3\x66\x7c\x59\xa6\xc4\x61\x3f\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x32\x2e\x74\x78\x74\x62\x6f\x64\x79\x32\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xc9\x66\x7c\x59\x30\xf4\x66\x48\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x33\x2e\x74\x78\x74\x62\x6f\x64\x79\x33\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\xb9\x66\x7c\x59\x1c\x95\x68\xa6\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x24\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x8b\xf4\x7a\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\xc3\x66\x7c\x59\xa6\xc4\x61\x3f\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x24\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x2c\x00\x00\x00\x66\x69\x6c\x65\x32\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\xf3\x7d\x84\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x32\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\xc9\x66\x7c\x59\x30\xf4\x66\x48\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x24\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x58\x00\x00\x00\x66\x69\x6c\x65\x33\x2e\x74\x78\x74\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x01\xa5\x8b\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x33\x50\x4b\x05\x06\x00\x00\x00\x00\x03\x00\x03\x00\x3b\x01\x00\x00\x84\x00\x00\x00\x0e\x00\x41\x72\x63\x68\x69\x76\x65\x43\x6f\x6d\x6d\x65\x6e\x74")
+	data := []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x84\x4a\x7e\x59\x1c\x95\x68\xa6\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x62\x6f\x64\x79\x31\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x88\x4a\x7e\x59\xa6\xc4\x61\x3f\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x32\x2e\x74\x78\x74\x62\x6f\x64\x79\x32\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x8c\x4a\x7e\x59\x30\xf4\x66\x48\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x33\x2e\x74\x78\x74\x62\x6f\x64\x79\x33\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x84\x4a\x7e\x59\x1c\x95\x68\xa6\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x88\x4a\x7e\x59\xa6\xc4\x61\x3f\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x2c\x00\x00\x00\x66\x69\x6c\x65\x32\x2e\x74\x78\x74\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x32\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x8c\x4a\x7e\x59\x30\xf4\x66\x48\x05\x00\x00\x00\x05\x00\x00\x00\x09\x00\x00\x00\x0e\x00\x00\x00\x01\x00\x20\x00\x00\x00\x58\x00\x00\x00\x66\x69\x6c\x65\x33\x2e\x74\x78\x74\x43\x6f\x6d\x6d\x65\x6e\x74\x4f\x6e\x46\x69\x6c\x65\x33\x50\x4b\x05\x06\x00\x00\x00\x00\x03\x00\x03\x00\xcf\x00\x00\x00\x84\x00\x00\x00\x0e\x00\x41\x72\x63\x68\x69\x76\x65\x43\x6f\x6d\x6d\x65\x6e\x74")
 	numEntries := uint16(3)
 	commentLength := uint16(14)
 	comment := []byte("ArchiveComment")
 	centralDirOffset := uint32(132)
-	centralDirSize := uint32(315)
+	centralDirSize := uint32(207)
 	headers := []fileHeader{
 		{
-			versionMadeBy:     0x0014,
-			versionNeeded:     0x0014,
-			flags:             0x0000,
-			compressionMethod: 0x0000,
-			dosTime:           0x66b9,
-			dosDate:           0x597c,
-			crc:               0xa668951c,
-			compressedSize:    0x00000005,
-			uncompressedSize:  0x00000005,
-			nameLength:        0x0009,
-			extraLength:       0x0024,
-			commentLength:     0x000e,
-			internalAttr:      0x0001,
-			externalAttr:      0x00000020,
-			offsetLocalHeader: 0x00000000,
-			fileName:          "file1.txt",
-			comment:           "CommentOnFile1",
-			extraField:        []byte("\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x8b\xf4\x7a\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+			versionMadeBy:      0x0014,
+			versionNeeded:      0x0014,
+			flags:              0x0000,
+			compressionMethod:  0x0000,
+			dosTime:            0x4a84,
+			dosDate:            0x597e,
+			crc:                0xa668951c,
+			compressedSize:     0x00000005,
+			uncompressedSize:   0x00000005,
+			nameLength:         0x0009,
+			extraLengthLocal:   0x0000,
+			extraLengthCentral: 0x0000,
+			commentLength:      0x000e,
+			internalAttr:       0x0001,
+			externalAttr:       0x00000020,
+			offsetLocalHeader:  0x00000000,
+			fileName:           "file1.txt",
+			comment:            "CommentOnFile1",
 		},
 		{
-			versionMadeBy:     0x0014,
-			versionNeeded:     0x0014,
-			flags:             0x0000,
-			compressionMethod: 0x0000,
-			dosTime:           0x66c3,
-			dosDate:           0x597c,
-			crc:               0x3f61c4a6,
-			compressedSize:    0x00000005,
-			uncompressedSize:  0x00000005,
-			nameLength:        0x0009,
-			extraLength:       0x0024,
-			commentLength:     0x000e,
-			internalAttr:      0x0001,
-			externalAttr:      0x00000020,
-			offsetLocalHeader: 0x0000002c,
-			fileName:          "file2.txt",
-			comment:           "CommentOnFile2",
-			extraField:        []byte("\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\xf3\x7d\x84\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+			versionMadeBy:      0x0014,
+			versionNeeded:      0x0014,
+			flags:              0x0000,
+			compressionMethod:  0x0000,
+			dosTime:            0x4a88,
+			dosDate:            0x597e,
+			crc:                0x3f61c4a6,
+			compressedSize:     0x00000005,
+			uncompressedSize:   0x00000005,
+			nameLength:         0x0009,
+			extraLengthLocal:   0x0000,
+			extraLengthCentral: 0x0000,
+			commentLength:      0x000e,
+			internalAttr:       0x0001,
+			externalAttr:       0x00000020,
+			offsetLocalHeader:  0x0000002c,
+			fileName:           "file2.txt",
+			comment:            "CommentOnFile2",
 		},
 		{
-			versionMadeBy:     0x0014,
-			versionNeeded:     0x0014,
-			flags:             0x0000,
-			compressionMethod: 0x0000,
-			dosTime:           0x66c9,
-			dosDate:           0x597c,
-			crc:               0x4866f430,
-			compressedSize:    0x00000005,
-			uncompressedSize:  0x00000005,
-			nameLength:        0x0009,
-			extraLength:       0x0024,
-			commentLength:     0x000e,
-			internalAttr:      0x0001,
-			externalAttr:      0x00000020,
-			offsetLocalHeader: 0x00000058,
-			fileName:          "file3.txt",
-			comment:           "CommentOnFile3",
-			extraField:        []byte("\x0a\x00\x20\x00\x00\x00\x00\x00\x01\x00\x18\x00\x00\x01\xa5\x8b\xbe\x41\xdb\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+			versionMadeBy:      0x0014,
+			versionNeeded:      0x0014,
+			flags:              0x0000,
+			compressionMethod:  0x0000,
+			dosTime:            0x4a8c,
+			dosDate:            0x597e,
+			crc:                0x4866f430,
+			compressedSize:     0x00000005,
+			uncompressedSize:   0x00000005,
+			nameLength:         0x0009,
+			extraLengthLocal:   0x0000,
+			extraLengthCentral: 0x0000,
+			commentLength:      0x000e,
+			internalAttr:       0x0001,
+			externalAttr:       0x00000020,
+			offsetLocalHeader:  0x00000058,
+			fileName:           "file3.txt",
+			comment:            "CommentOnFile3",
 		},
 	}
 
@@ -196,6 +293,8 @@ func TestExtract(t *testing.T) {
 	}{
 		{"WellFormed", false, file1Name, file1Data, []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x74\x65\x73\x74\x20\x64\x61\x74\x61\x20\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x32\x00\x00\x00\x00\x00")},
 		{"BadExtraField", true, file1Name, file1Data, []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x01\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x74\x65\x73\x74\x20\x64\x61\x74\x61\x20\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\x1e\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x32\x00\x00\x00\x00\x00")},
+
+		// CRC is the saame in local header and central directory, but it's incorrect:
 		{"BadCRC", true, file1Name, file1Data, []byte("\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\xff\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x74\x65\x73\x74\x20\x64\x61\x74\x61\x20\x31\x50\x4b\x01\x02\x14\x00\x14\x00\x00\x00\x00\x00\x22\x72\x7d\x59\xba\xa7\xff\x62\x0b\x00\x00\x00\x0b\x00\x00\x00\x09\x00\x00\x00\x00\x00\x00\x00\x01\x00\x20\x00\x00\x00\x00\x00\x00\x00\x66\x69\x6c\x65\x31\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x37\x00\x00\x00\x32\x00\x00\x00\x00\x00")},
 	}
 

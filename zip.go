@@ -30,24 +30,24 @@ type File struct {
 // FileHeader represents a file header from the zip file's central directory. Each field
 // corresponds to a field in the zip file's central directory file header.
 type fileHeader struct {
-	versionMadeBy     uint16
-	versionNeeded     uint16
-	flags             uint16
-	compressionMethod uint16
-	dosTime           uint16
-	dosDate           uint16
-	crc               uint32
-	compressedSize    uint32
-	uncompressedSize  uint32
-	nameLength        uint16
-	extraLength       uint16
-	commentLength     uint16
-	internalAttr      uint16
-	externalAttr      uint32
-	offsetLocalHeader uint32
-	fileName          string
-	extraField        []byte
-	comment           string
+	versionMadeBy      uint16
+	versionNeeded      uint16
+	flags              uint16
+	compressionMethod  uint16
+	dosTime            uint16
+	dosDate            uint16
+	crc                uint32
+	compressedSize     uint32
+	uncompressedSize   uint32
+	nameLength         uint16
+	extraLengthLocal   uint16 // the length of the extra field in the local file header
+	extraLengthCentral uint16 // the length of the extra field in the central file header
+	commentLength      uint16
+	internalAttr       uint16
+	externalAttr       uint32
+	offsetLocalHeader  uint32
+	fileName           string
+	comment            string
 }
 
 func Create(archiveName string, fileName string, method CompressionMethod) (*File, error) {
@@ -178,33 +178,46 @@ func (zf *File) readDirectory() error {
 		fh.compressedSize = binary.LittleEndian.Uint32(buffer[i+20 : i+24])
 		fh.uncompressedSize = binary.LittleEndian.Uint32(buffer[i+24 : i+28])
 		fh.nameLength = binary.LittleEndian.Uint16(buffer[i+28 : i+30])
-		fh.extraLength = binary.LittleEndian.Uint16(buffer[i+30 : i+32])
+		fh.extraLengthCentral = binary.LittleEndian.Uint16(buffer[i+30 : i+32])
 		fh.commentLength = binary.LittleEndian.Uint16(buffer[i+32 : i+34])
 		// don't bother with disk # start
 		fh.internalAttr = binary.LittleEndian.Uint16(buffer[i+36 : i+38])
 		fh.externalAttr = binary.LittleEndian.Uint32(buffer[i+38 : i+42])
 		fh.offsetLocalHeader = binary.LittleEndian.Uint32(buffer[i+42 : i+46])
-		if len(buffer) < i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength) {
+		if len(buffer) < i+46+int(fh.nameLength)+int(fh.extraLengthCentral)+int(fh.commentLength) {
 			return newZipErrorStr("ReadDir", "central directory is malformed (not enough data)")
 		}
 		fh.fileName = string(buffer[i+46 : i+46+int(fh.nameLength)])
-		if fh.extraLength > 0 {
-			fh.extraField = make([]byte, int(fh.extraLength))
-			fh.extraField = buffer[i+46+int(fh.nameLength) : i+46+int(fh.nameLength)+int(fh.extraLength)]
-		}
+		// This is where the extra field goes, but we're not bothering to keep it
 		if fh.commentLength > 0 {
-			fh.comment = string(buffer[i+46+int(fh.nameLength)+int(fh.extraLength) : i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength)])
+			fh.comment = string(buffer[i+46+int(fh.nameLength)+int(fh.extraLengthCentral) : i+46+int(fh.nameLength)+int(fh.extraLengthCentral)+int(fh.commentLength)])
 		}
 		zf.fileHeaders = append(zf.fileHeaders, fh)
-		i += 46 + int(fh.nameLength) + int(fh.extraLength) + int(fh.commentLength)
+		i += 46 + int(fh.nameLength) + int(fh.extraLengthCentral) + int(fh.commentLength)
 	}
 
-	// Don't bother reading the local file headers to make sure that the central directory
-	// is valid. Do that lazily, when we actually need to look at the local file headers.
-
-	// TODO maybe check the local file headers here, actually. For the caller, it makes
-	// the most sense to get an error when you first try to open a bad zip file, vs
-	// when you try to extract a file from it.
+	// Check the local file headers. Local headers are sometimes different from the central
+	// ones (a bizarre feature of the zip format). So don't do error checking on most things.
+	// BUT we do need to keep track of the extra field length here (which may not be the same
+	// as the extra field length in the central directory); that's important for seeking.
+	for _, fh := range zf.fileHeaders {
+		_, err := zf.file.Seek(int64(fh.offsetLocalHeader), io.SeekStart)
+		if err != nil {
+			return newZipError("ReadDir Seek Local File Header", err)
+		}
+		buffer := make([]byte, 30)
+		err = binary.Read(zf.file, binary.LittleEndian, &buffer)
+		if err != nil {
+			return newZipError("ReadDir Read Local File Header", err)
+		}
+		if buffer[0] != 0x50 || buffer[1] != 0x4b || buffer[2] != 0x03 || buffer[3] != 0x04 {
+			return newZipErrorStr("ReadDir", "couldn't find local file header signature")
+		}
+		if fh.nameLength != binary.LittleEndian.Uint16(buffer[26:28]) {
+			return newZipErrorStr("ReadDir", "local file header doesn't match central directory (filename length)")
+		}
+		fh.extraLengthLocal = binary.LittleEndian.Uint16(buffer[28:30])
+	}
 
 	return nil
 }

@@ -119,14 +119,23 @@ func (zf *File) writeArchive(outfile afero.File) error {
 	}
 
 	// Write local file headers and file data
-	for _, fh := range zf.fileHeaders {
-		// Update the offset of the local file header as we go, since that
-		// is the value in fh that is possibly incorrect now
+	for i, fh := range zf.fileHeaders {
+		// Get the data for this header's file BEFORE we change anything about the header
+		fileDataOffset := fh.offsetLocalHeader + 30 + uint32(fh.nameLength) + uint32(fh.extraLengthLocal)
+		zf.file.Seek(int64(fileDataOffset), io.SeekStart)
+		fileData := make([]byte, fh.compressedSize)
+		err = binary.Read(zf.file, binary.LittleEndian, fileData)
+		if err != nil {
+			return err
+		}
+
+		// Update the file header struct: offset and extra length
 		offset, err := outfile.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return err
 		}
-		fh.offsetLocalHeader = uint32(offset)
+		zf.fileHeaders[i].offsetLocalHeader = uint32(offset)
+		zf.fileHeaders[i].extraLengthLocal = 0
 
 		binary.Write(outfile, binary.LittleEndian, []byte("\x50\x4b\x03\x04"))
 		binary.Write(outfile, binary.LittleEndian, fh.versionNeeded)
@@ -138,17 +147,9 @@ func (zf *File) writeArchive(outfile afero.File) error {
 		binary.Write(outfile, binary.LittleEndian, fh.compressedSize)
 		binary.Write(outfile, binary.LittleEndian, fh.uncompressedSize)
 		binary.Write(outfile, binary.LittleEndian, fh.nameLength)
-		binary.Write(outfile, binary.LittleEndian, fh.extraLength)
+		binary.Write(outfile, binary.LittleEndian, []byte("\x00\x00")) // extra field length
 		binary.Write(outfile, binary.LittleEndian, []byte(fh.fileName))
-		binary.Write(outfile, binary.LittleEndian, fh.extraField)
-
-		fileDataOffset := fh.offsetLocalHeader + 30 + uint32(fh.nameLength) + uint32(fh.extraLength)
-		zf.file.Seek(int64(fileDataOffset), io.SeekStart)
-		fileData := make([]byte, fh.compressedSize)
-		err = binary.Read(zf.file, binary.LittleEndian, fileData)
-		if err != nil {
-			return err
-		}
+		// Extra field goes after file name, but we're not keeping extra fields
 		binary.Write(outfile, binary.LittleEndian, fileData)
 	}
 
@@ -159,7 +160,7 @@ func (zf *File) writeArchive(outfile afero.File) error {
 	}
 	zf.centralDirOffset = uint32(offset)
 
-	for _, fh := range zf.fileHeaders {
+	for i, fh := range zf.fileHeaders {
 		errs := []error{}
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte("\x50\x4b\x01\x02")))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.versionMadeBy))
@@ -172,20 +173,21 @@ func (zf *File) writeArchive(outfile afero.File) error {
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.compressedSize))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.uncompressedSize))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.nameLength))
-		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.extraLength))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte("\x00\x00"))) // extra field length
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.commentLength))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, uint16(0))) // disk # start
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.internalAttr))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.externalAttr))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.offsetLocalHeader))
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte(fh.fileName)))
-		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.extraField))
+		// Extra field goes after file name, but we're not keeping extra fields
 		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte(fh.comment)))
 		for _, err := range errs {
 			if err != nil {
 				return err
 			}
 		}
+		zf.fileHeaders[i].extraLengthCentral = 0 // We threw out the extra field as we wrote the central directory
 	}
 
 	// Update central directory size
