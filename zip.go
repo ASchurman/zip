@@ -118,11 +118,11 @@ func (zf *File) readDirectory() error {
 	for ; !found; offset-- {
 		pos, err := zf.file.Seek(offset, io.SeekEnd)
 		if err != nil || pos < 0 {
-			return newZipErrorStr("Read Directory", "couldn't find end of directory signature")
+			return newZipErrorStr("ReadDir Seek", "couldn't find end of directory signature")
 		}
 		err = binary.Read(zf.file, binary.LittleEndian, &buffer)
 		if err != nil {
-			return newZipError("Read Directory", err)
+			return newZipError("ReadDir Read", err)
 		}
 		if buffer[0] == 0x50 && buffer[1] == 0x4b && buffer[2] == 0x05 && buffer[3] == 0x06 {
 			found = true
@@ -130,7 +130,7 @@ func (zf *File) readDirectory() error {
 		}
 	}
 	if !found {
-		return newZipErrorStr("Read Directory", "couldn't find end of central directory signature")
+		return newZipErrorStr("ReadDir Find", "couldn't find end of central directory signature")
 	}
 
 	// buffer contains 22 bytes of the end of central directory record, starting from signature.
@@ -144,7 +144,7 @@ func (zf *File) readDirectory() error {
 		zf.comment = make([]byte, zf.commentLength)
 		err := binary.Read(zf.file, binary.LittleEndian, &zf.comment)
 		if err != nil {
-			return newZipError("Read Directory", err)
+			return newZipError("ReadDir Read Comment", err)
 		}
 	}
 
@@ -152,20 +152,20 @@ func (zf *File) readDirectory() error {
 	buffer = make([]byte, zf.centralDirSize)
 	_, err := zf.file.Seek(int64(zf.centralDirOffset), 0)
 	if err != nil {
-		return newZipError("Read Directory", err)
+		return newZipError("ReadDir Seek Central Directory", err)
 	}
 	err = binary.Read(zf.file, binary.LittleEndian, &buffer)
 	if err != nil {
-		return newZipError("Read Directory", err)
+		return newZipError("ReadDir Read Central Directory", err)
 	}
 	// buffer now contains the central directory. Read it into zf.fileHeaders
 	i := 0
 	for entry := 0; entry < int(zf.numEntries); entry++ {
 		if len(buffer) < i+46 {
-			return newZipErrorStr("Read Directory", "central directory is malformed")
+			return newZipErrorStr("ReadDir", "central directory is malformed (<46 bytes)")
 		}
 		if buffer[i] != 0x50 || buffer[i+1] != 0x4b || buffer[i+2] != 0x01 || buffer[i+3] != 0x02 {
-			return newZipErrorStr("Read Directory", "couldn't find central directory file header signature")
+			return newZipErrorStr("ReadDir", "couldn't find central directory file header signature")
 		}
 		fh := fileHeader{}
 		fh.versionMadeBy = binary.LittleEndian.Uint16(buffer[i+4 : i+6])
@@ -185,7 +185,7 @@ func (zf *File) readDirectory() error {
 		fh.externalAttr = binary.LittleEndian.Uint32(buffer[i+38 : i+42])
 		fh.offsetLocalHeader = binary.LittleEndian.Uint32(buffer[i+42 : i+46])
 		if len(buffer) < i+46+int(fh.nameLength)+int(fh.extraLength)+int(fh.commentLength) {
-			return newZipErrorStr("Read Directory", "central directory is malformed")
+			return newZipErrorStr("ReadDir", "central directory is malformed (not enough data)")
 		}
 		fh.fileName = string(buffer[i+46 : i+46+int(fh.nameLength)])
 		if fh.extraLength > 0 {
@@ -244,37 +244,52 @@ func (zf *File) AddFile(name string, method CompressionMethod) error {
 		return errors.New("deflate not implemented")
 	}
 
-	// Make a temp file to write the new zip contents into
-
-	// Traverse the current file, copying it to the temp file unless it's the file we're adding.
-
-	// Update metadata with the new file
-
-	// Write the new file we're adding
-
-	// Write the central directory
-
-	// Clean-up:
-	// Close the temp file, close and delete zf.file, rename the temp file,
-	// replace zf.file with the renamed temp file, and reopen it.
-
 	return errors.New("not implemented")
 }
 
 func (zf *File) RemoveFile(name string) error {
+	// Remove the fileheader from the metadata
+	foundFh := false
+	for i, fh := range zf.fileHeaders {
+		if fh.fileName == name {
+			foundFh = true
+			zf.numEntries--
+			zf.fileHeaders = append(zf.fileHeaders[:i], zf.fileHeaders[i+1:]...)
+			break
+		}
+	}
+	if !foundFh {
+		return nil // Let's not return an error if the archive doesn't have the file?
+	}
+
 	// Make a temp file to write the new zip contents into
+	outfileTempName := tempName(zf.Name)
+	outfile, err := zf.fs.Create(outfileTempName)
+	if err != nil {
+		return err
+	}
 
-	// Traverse the current file, copying it to the temp file unless it's the file we're removing.
-
-	// Update metadata with the removed file
-
-	// Write the central directory
+	// Write the updated archive into the temp file
+	zf.writeArchive(outfile)
 
 	// Clean-up:
-	// Close the temp file, close and delete zf.file, rename the temp file,
+	// Close zf.file, close temp file,rename the temp file (which deletes the old file),
 	// replace zf.file with the renamed temp file, and reopen it.
+	err = zf.file.Close()
+	if err != nil {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return err
+	}
+	err = zf.closeAndRenameTempFile(outfile, outfileTempName, zf.Name)
+	if err != nil {
+		return err
+	}
+	zf.file, err = zf.fs.Open(zf.Name)
+	if err != nil {
+		return err
+	}
 
-	return errors.New("not implemented")
+	return nil
 }
 
 func (zf *File) ExtractFile(name string) error {

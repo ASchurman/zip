@@ -45,7 +45,9 @@ func main() {
 	} else if *optAdd {
 		panic("Not implemented")
 	} else if *optDelete {
-		panic("Not implemented")
+		for _, arg := range args[1:] {
+			panicOnError(zf.RemoveFile(arg))
+		}
 	}
 }
 

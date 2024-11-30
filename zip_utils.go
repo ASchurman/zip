@@ -1,6 +1,7 @@
 package zip
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -106,4 +107,110 @@ func checkCrc(crc uint32, file afero.File) (bool, error) {
 	fileCrc := crc32.ChecksumIEEE(data)
 
 	return crc == fileCrc, nil
+}
+
+// Writes the zip archive to the temporary new zip file.
+// Assumes that zf.fileHeaders has the correct headers in it, but fields related to
+// offsets and the size of the central directory are incorrect.
+func (zf *File) writeArchive(outfile afero.File) error {
+	_, err := outfile.Seek(0, io.SeekStart)
+	if err != nil {
+		return err
+	}
+
+	// Write local file headers and file data
+	for _, fh := range zf.fileHeaders {
+		// Update the offset of the local file header as we go, since that
+		// is the value in fh that is possibly incorrect now
+		offset, err := outfile.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		fh.offsetLocalHeader = uint32(offset)
+
+		binary.Write(outfile, binary.LittleEndian, []byte("\x50\x4b\x03\x04"))
+		binary.Write(outfile, binary.LittleEndian, fh.versionNeeded)
+		binary.Write(outfile, binary.LittleEndian, fh.flags)
+		binary.Write(outfile, binary.LittleEndian, fh.compressionMethod)
+		binary.Write(outfile, binary.LittleEndian, fh.dosTime)
+		binary.Write(outfile, binary.LittleEndian, fh.dosDate)
+		binary.Write(outfile, binary.LittleEndian, fh.crc)
+		binary.Write(outfile, binary.LittleEndian, fh.compressedSize)
+		binary.Write(outfile, binary.LittleEndian, fh.uncompressedSize)
+		binary.Write(outfile, binary.LittleEndian, fh.nameLength)
+		binary.Write(outfile, binary.LittleEndian, fh.extraLength)
+		binary.Write(outfile, binary.LittleEndian, []byte(fh.fileName))
+		binary.Write(outfile, binary.LittleEndian, fh.extraField)
+
+		fileDataOffset := fh.offsetLocalHeader + 30 + uint32(fh.nameLength) + uint32(fh.extraLength)
+		zf.file.Seek(int64(fileDataOffset), io.SeekStart)
+		fileData := make([]byte, fh.compressedSize)
+		err = binary.Read(zf.file, binary.LittleEndian, fileData)
+		if err != nil {
+			return err
+		}
+		binary.Write(outfile, binary.LittleEndian, fileData)
+	}
+
+	// Update central directory offset and write central directory
+	offset, err := outfile.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	zf.centralDirOffset = uint32(offset)
+
+	for _, fh := range zf.fileHeaders {
+		errs := []error{}
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte("\x50\x4b\x01\x02")))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.versionMadeBy))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.versionNeeded))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.flags))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.compressionMethod))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.dosTime))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.dosDate))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.crc))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.compressedSize))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.uncompressedSize))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.nameLength))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.extraLength))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.commentLength))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, uint16(0))) // disk # start
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.internalAttr))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.externalAttr))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.offsetLocalHeader))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte(fh.fileName)))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, fh.extraField))
+		errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte(fh.comment)))
+		for _, err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// Update central directory size
+	offset, err = outfile.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	zf.centralDirSize = uint32(offset) - zf.centralDirOffset
+
+	// Write the end-of-central-directory record
+	errs := []error{}
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, []byte("\x50\x4b\x05\x06")))
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, uint16(0)))     // disk # start
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, uint16(0)))     // disk # of cd
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, zf.numEntries)) // entires on this disk
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, zf.numEntries)) // total entries
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, zf.centralDirSize))
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, zf.centralDirOffset))
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, zf.commentLength))
+	errs = append(errs, binary.Write(outfile, binary.LittleEndian, zf.comment))
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
