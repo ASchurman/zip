@@ -43,7 +43,9 @@ func main() {
 			panicOnError(zf.ExtractAll())
 		}
 	} else if *optAdd {
-		panic("Not implemented")
+		for _, arg := range args[1:] {
+			panicOnError(zf.AddFile(arg, zip.COMPRESS_STORED))
+		}
 	} else if *optDelete {
 		for _, arg := range args[1:] {
 			panicOnError(zf.RemoveFile(arg))

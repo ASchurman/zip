@@ -257,7 +257,89 @@ func (zf *File) AddFile(name string, method CompressionMethod) error {
 		return errors.New("deflate not implemented")
 	}
 
-	return errors.New("not implemented")
+	// First open the file...
+	newFile, err := zf.fs.Open(name)
+	if err != nil {
+		return err
+	}
+	defer newFile.Close()
+
+	// Get file info for header
+	info, err := newFile.Stat()
+	if err != nil {
+		return err
+	}
+	uncompressedSize := uint32(info.Size())
+	modTime := info.ModTime()
+	dosDate, dosTime := timeToDosDateTime(modTime)
+
+	crc, err := getCrc(newFile)
+	if err != nil {
+		return err
+	}
+
+	// Make a file header. Offsets don't matter yet, but everything else does.
+	newFh := fileHeader{
+		versionMadeBy:      VERSION_MADE_BY,
+		versionNeeded:      VERSION_NEEDED,
+		flags:              FLAGS,
+		compressionMethod:  uint16(method),
+		dosTime:            dosTime,
+		dosDate:            dosDate,
+		crc:                crc,
+		compressedSize:     uncompressedSize,
+		uncompressedSize:   uncompressedSize,
+		nameLength:         uint16(len(name)),
+		extraLengthLocal:   0,
+		extraLengthCentral: 0,
+		commentLength:      0,
+		internalAttr:       INTERNAL_ATTR,
+		externalAttr:       EXTERNAL_ATTR,
+		fileName:           name,
+	}
+
+	// Remove fileheader from metadata if it already exists.
+	for i, fh := range zf.fileHeaders {
+		if fh.fileName == name {
+			zf.numEntries--
+			zf.fileHeaders = append(zf.fileHeaders[:i], zf.fileHeaders[i+1:]...)
+			break
+		}
+	}
+
+	// Make a temp file to write the new zip contents into
+	outfileTempName := tempName(zf.Name)
+	outfile, err := zf.fs.Create(outfileTempName)
+	if err != nil {
+		return err
+	}
+
+	// Write the updated archive into the temp file
+	zf.numEntries++
+	err = zf.writeArchive(outfile, &newFh, newFile)
+	if err != nil {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return err
+	}
+
+	// Clean-up:
+	// Close zf.file, close temp file,rename the temp file (which deletes the old file),
+	// replace zf.file with the renamed temp file, and reopen it.
+	err = zf.file.Close()
+	if err != nil {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return err
+	}
+	err = zf.closeAndRenameTempFile(outfile, outfileTempName, zf.Name)
+	if err != nil {
+		return err
+	}
+	zf.file, err = zf.fs.Open(zf.Name)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (zf *File) RemoveFile(name string) error {
@@ -283,7 +365,11 @@ func (zf *File) RemoveFile(name string) error {
 	}
 
 	// Write the updated archive into the temp file
-	zf.writeArchive(outfile)
+	err = zf.writeArchive(outfile, nil, nil)
+	if err != nil {
+		zf.closeAndDeleteTempFile(outfile, outfileTempName)
+		return err
+	}
 
 	// Clean-up:
 	// Close zf.file, close temp file,rename the temp file (which deletes the old file),

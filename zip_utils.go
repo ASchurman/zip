@@ -34,6 +34,13 @@ func compressionMethodToString(method CompressionMethod) string {
 const (
 	// If we have no files, then we only have end-of-central-dir record
 	CENTRAL_DIR_MIN_SIZE = 22
+
+	// Constants for file headers that we make from scratch
+	VERSION_MADE_BY = 20
+	VERSION_NEEDED  = 20
+	FLAGS           = 0
+	INTERNAL_ATTR   = 0
+	EXTERNAL_ATTR   = 0
 )
 
 type ZipError struct {
@@ -63,6 +70,20 @@ func dosToTime(dosDate uint16, dosTime uint16) time.Time {
 	return time.Date(int(year)+1980, time.Month(month), int(day), int(hr), int(min), int(sec), 0, time.Local)
 }
 
+func timeToDosDateTime(t time.Time) (uint16, uint16) {
+	year := uint16(t.Year() - 1980)
+	month := uint16(t.Month())
+	day := uint16(t.Day())
+	hr := uint16(t.Hour())
+	min := uint16(t.Minute())
+	sec := uint16(t.Second())
+
+	dosDate := uint16(year<<9 | month<<5 | day)
+	dosTime := uint16(hr<<11 | min<<5 | sec)
+
+	return dosDate, dosTime
+}
+
 func (fh *fileHeader) getDateTime() time.Time {
 	return dosToTime(fh.dosDate, fh.dosTime)
 }
@@ -90,43 +111,57 @@ func (zf *File) closeAndRenameTempFile(file afero.File, tempName string, name st
 }
 
 func checkCrc(crc uint32, file afero.File) (bool, error) {
-	// TODO there's surely a better way to do this beside reading the whole file into memory
-	_, err := file.Seek(0, io.SeekStart)
+	fileCrc, err := getCrc(file)
 	if err != nil {
 		return false, err
 	}
+	return crc == fileCrc, nil
+}
+
+func getCrc(file afero.File) (uint32, error) {
+	// TODO there's surely a better way to do this beside reading the whole file into memory
+	_, err := file.Seek(0, io.SeekStart)
+	if err != nil {
+		return 0, err
+	}
 	info, err := file.Stat()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	data := make([]byte, info.Size())
 	_, err = file.Read(data)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
-	fileCrc := crc32.ChecksumIEEE(data)
-
-	return crc == fileCrc, nil
+	return crc32.ChecksumIEEE(data), nil
 }
 
 // Writes the zip archive to the temporary new zip file.
 // Assumes that zf.fileHeaders has the correct headers in it, but fields related to
 // offsets and the size of the central directory are incorrect.
-func (zf *File) writeArchive(outfile afero.File) error {
+// newFh and newData represent a new file to be added to the archive. If they're not nil,
+// then they will be added.
+func (zf *File) writeArchive(outfile afero.File, newFh *fileHeader, newData io.ReadSeeker) error {
 	_, err := outfile.Seek(0, io.SeekStart)
 	if err != nil {
 		return err
 	}
 
+	if newFh != nil {
+		zf.fileHeaders = append(zf.fileHeaders, *newFh)
+	}
+
 	// Write local file headers and file data
 	for i, fh := range zf.fileHeaders {
 		// Get the data for this header's file BEFORE we change anything about the header
-		fileDataOffset := fh.offsetLocalHeader + 30 + uint32(fh.nameLength) + uint32(fh.extraLengthLocal)
-		zf.file.Seek(int64(fileDataOffset), io.SeekStart)
-		fileData := make([]byte, fh.compressedSize)
-		err = binary.Read(zf.file, binary.LittleEndian, fileData)
-		if err != nil {
-			return err
+		var fileData io.Reader
+		if newFh == nil || i < len(zf.fileHeaders)-1 {
+			fileDataOffset := fh.offsetLocalHeader + 30 + uint32(fh.nameLength) + uint32(fh.extraLengthLocal)
+			zf.file.Seek(int64(fileDataOffset), io.SeekStart)
+			fileData = io.LimitReader(zf.file, int64(fh.compressedSize))
+		} else { // Last file, which is the new file, since newFh != nil
+			newData.Seek(0, io.SeekStart)
+			fileData = newData
 		}
 
 		// Update the file header struct: offset and extra length
@@ -150,7 +185,10 @@ func (zf *File) writeArchive(outfile afero.File) error {
 		binary.Write(outfile, binary.LittleEndian, []byte("\x00\x00")) // extra field length
 		binary.Write(outfile, binary.LittleEndian, []byte(fh.fileName))
 		// Extra field goes after file name, but we're not keeping extra fields
-		binary.Write(outfile, binary.LittleEndian, fileData)
+		_, err = io.Copy(outfile, fileData)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Update central directory offset and write central directory
