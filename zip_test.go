@@ -1,9 +1,8 @@
 package zip
 
 import (
+	"archive/zip"
 	"bytes"
-	"encoding/binary"
-	"hash/crc32"
 	"reflect"
 	"testing"
 
@@ -26,6 +25,7 @@ func makeTestFile(fs afero.Fs, name string, data []byte) error {
 	return nil
 }
 
+/*
 // Make a zip file with a single entry stored (not deflated) in it
 func makeTestZipStore(fs afero.Fs,
 	zipName string,
@@ -120,6 +120,7 @@ func makeTestZipStore(fs afero.Fs,
 
 	return makeTestFile(fs, zipName, zipData)
 }
+*/
 
 func TestReadDirectoryFailures(t *testing.T) {
 	appFs := afero.NewMemMapFs()
@@ -333,4 +334,75 @@ func TestExtract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDelete(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	zipFileName := "testArchive.zip"
+	zipFile, err := fs.Create(zipFileName)
+	if err != nil {
+		t.Fatalf("fs.Create returned error: %v", err)
+	}
+
+	// Create test zip file using a different zip writer (so this test doesn't depend
+	// on my implementation of adding files to zip archive)
+	zipWriter := zip.NewWriter(zipFile)
+	var files = []struct {
+		name, body string
+	}{
+		{"file1.txt", "This archive contains some text files."},
+		{"filebeta.txt", "Second file in the archive."},
+		{"fileThree.txt", "File number 3"},
+	}
+	for _, file := range files {
+		f, err := zipWriter.Create(file.name)
+		if err != nil {
+			t.Fatalf("zipWriter.Create returned error: %v", err)
+		}
+		_, err = f.Write([]byte(file.body))
+		if err != nil {
+			t.Fatalf("zipWriter.Write returned error: %v", err)
+		}
+	}
+	err = zipWriter.Close()
+	if err != nil {
+		t.Fatalf("zipWriter.Close returned error: %v", err)
+	}
+	zipFile.Close()
+
+	zf, err := OpenWithFs(zipFileName, fs)
+	if err != nil {
+		t.Fatalf("OpenWithFs returned error: %v", err)
+	}
+	err = zf.RemoveFile(files[0].name)
+	if err != nil {
+		t.Fatalf("RemoveFile returned error: %v", err)
+	}
+	err = zf.Close()
+	if err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	// Check that the file was deleted
+	zipFile, err = fs.Open(zipFileName)
+	if err != nil {
+		t.Fatalf("fs.Open returned error during verify step: %v", err)
+	}
+	info, err := zipFile.Stat()
+	if err != nil {
+		t.Fatalf("zipFile.Stat returned error during verify step: %v", err)
+	}
+	zipReader, err := zip.NewReader(zipFile, info.Size())
+	if err != nil {
+		t.Fatalf("zip.OpenReader returned error: %v", err)
+	}
+	if len(zipReader.File) != 2 {
+		t.Errorf("zipReader.File has length %d; Want: 2", len(zipReader.File))
+	}
+	for i, f := range zipReader.File {
+		if f.Name != files[i+1].name {
+			t.Errorf("zipReader.File[%d].Name is %q; Want: %q", i, f.Name, files[i+1].name)
+		}
+	}
+	zipFile.Close()
 }
