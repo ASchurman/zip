@@ -51,23 +51,23 @@ type fileHeader struct {
 }
 
 func Create(archiveName string, fileName string, method CompressionMethod) (*File, error) {
-	return CreateWithFs(archiveName, fileName, method, afero.NewOsFs())
+	return CreateWithFs(afero.NewOsFs(), archiveName, fileName, method)
 }
 
-func CreateWithFs(archiveName string, fileName string, method CompressionMethod, fs afero.Fs) (*File, error) {
-	zf := File{Name: archiveName, fs: fs}
-	file, err := zf.fs.Create(archiveName)
-	if err != nil {
-		return nil, err
+func CreateWithFs(fs afero.Fs, archiveName string, fileName string, method CompressionMethod) (*File, error) {
+	// Make an empty zip.File, but don't actually make a file. When we call AddFile,
+	// we'll write the zip archive to a temp file, then rename it to archiveName.
+
+	zf := File{
+		Name:             archiveName,
+		fs:               fs,
+		numEntries:       0,
+		commentLength:    0,
+		centralDirSize:   CENTRAL_DIR_MIN_SIZE,
+		centralDirOffset: 0,
 	}
 
-	zf.file = file
-	zf.numEntries = 0
-	zf.commentLength = 0
-	zf.centralDirSize = CENTRAL_DIR_MIN_SIZE
-	zf.centralDirOffset = 0
-
-	err = zf.AddFile(fileName, method)
+	err := zf.AddFile(fileName, method)
 	return &zf, err
 }
 
@@ -325,10 +325,12 @@ func (zf *File) AddFile(name string, method CompressionMethod) error {
 	// Clean-up:
 	// Close zf.file, close temp file,rename the temp file (which deletes the old file),
 	// replace zf.file with the renamed temp file, and reopen it.
-	err = zf.file.Close()
-	if err != nil {
-		zf.closeAndDeleteTempFile(outfile, outfileTempName)
-		return err
+	if zf.file != nil {
+		err = zf.file.Close()
+		if err != nil {
+			zf.closeAndDeleteTempFile(outfile, outfileTempName)
+			return err
+		}
 	}
 	err = zf.closeAndRenameTempFile(outfile, outfileTempName, zf.Name)
 	if err != nil {

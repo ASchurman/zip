@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -24,12 +25,14 @@ func main() {
 	// Open zip file
 	zf, err := zip.Open(args[0])
 	if err != nil {
-		panic(err)
+		// Don't panic if we're adding a file and the archive doesn't exist.
+		// In that case, we're creating a new archive.
+		if !*optAdd || !errors.Is(err, os.ErrNotExist) {
+			panic(err)
+		}
+	} else {
+		defer zf.Close()
 	}
-	if zf == nil {
-		panic("NewZipDir returned nil without having an error")
-	}
-	defer zf.Close()
 
 	// Do the desired operation
 	if *optTable {
@@ -44,7 +47,15 @@ func main() {
 		}
 	} else if *optAdd {
 		for _, arg := range args[1:] {
-			panicOnError(zf.AddFile(arg, zip.COMPRESS_STORED))
+			if zf == nil {
+				zf, err = zip.Create(args[0], arg, zip.COMPRESS_STORED)
+				if err != nil {
+					panic(err)
+				}
+				defer zf.Close()
+			} else {
+				panicOnError(zf.AddFile(arg, zip.COMPRESS_STORED))
+			}
 		}
 	} else if *optDelete {
 		for _, arg := range args[1:] {
