@@ -200,7 +200,7 @@ func (zf *File) readDirectory() error {
 	// ones (a bizarre feature of the zip format). So don't do error checking on most things.
 	// BUT we do need to keep track of the extra field length here (which may not be the same
 	// as the extra field length in the central directory); that's important for seeking.
-	for _, fh := range zf.fileHeaders {
+	for i, fh := range zf.fileHeaders {
 		_, err := zf.file.Seek(int64(fh.offsetLocalHeader), io.SeekStart)
 		if err != nil {
 			return newZipError("ReadDir Seek Local File Header", err)
@@ -216,7 +216,7 @@ func (zf *File) readDirectory() error {
 		if fh.nameLength != binary.LittleEndian.Uint16(buffer[26:28]) {
 			return newZipErrorStr("ReadDir", "local file header doesn't match central directory (filename length)")
 		}
-		fh.extraLengthLocal = binary.LittleEndian.Uint16(buffer[28:30])
+		zf.fileHeaders[i].extraLengthLocal = binary.LittleEndian.Uint16(buffer[28:30])
 	}
 
 	return nil

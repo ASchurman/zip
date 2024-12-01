@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/spf13/afero"
 )
@@ -25,102 +26,117 @@ func makeTestFile(fs afero.Fs, name string, data []byte) error {
 	return nil
 }
 
-/*
-// Make a zip file with a single entry stored (not deflated) in it
-func makeTestZipStore(fs afero.Fs,
-	zipName string,
-	fileName string,
-	fileData []byte,
-	zipComment string,
-	fileComment string) error {
-
-	fileCrc := crc32.ChecksumIEEE(fileData)
-	fileCrcBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(fileCrcBytes, fileCrc)
-
-	fileSize := uint32(len(fileData))
-	fileSizeBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(fileSizeBytes, fileSize)
-
-	fileNameLength := uint16(len(fileName))
-	fileNameLengthBytes := make([]byte, 2)
-	binary.LittleEndian.PutUint16(fileNameLengthBytes, fileNameLength)
-
-	fileCommentLength := uint16(len(fileComment))
-	fileCommentLengthBytes := make([]byte, 2)
-	binary.LittleEndian.PutUint16(fileCommentLengthBytes, fileCommentLength)
-
-	fileHeaderAndData := []byte{
-		0x50, 0x4b, 0x03, 0x04, // local file header
-		0x14, 0x00, // version to extract
-		0x00, 0x00, // flags
-		0x00, 0x00, // compression method
-		0xc7, 0x46, // time
-		0x7e, 0x59, // date
-		fileCrcBytes[0], fileCrcBytes[1], fileCrcBytes[2], fileCrcBytes[3], // crc
-		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // compressed size
-		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // uncompressed size
-		fileNameLengthBytes[0], fileNameLengthBytes[1], // file name length
-		0x00, 0x00, // extra field length
-	}
-
-	fileHeaderAndData = append(fileHeaderAndData, fileName...)
-	fileHeaderAndData = append(fileHeaderAndData, fileData...)
-
-	centralDirectory := []byte{
-		0x50, 0x4b, 0x01, 0x02, // signature
-		0x14, 0x00, // version made by
-		0x14, 0x00, // version to extract
-		0x00, 0x00, // flags
-		0x00, 0x00, // compression method
-		0xc7, 0x46, // time
-		0x7e, 0x59, // date
-		fileCrcBytes[0], fileCrcBytes[1], fileCrcBytes[2], fileCrcBytes[3], // crc
-		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // compressed size
-		fileSizeBytes[0], fileSizeBytes[1], fileSizeBytes[2], fileSizeBytes[3], // uncompressed size
-		fileNameLengthBytes[0], fileNameLengthBytes[1], // file name length
-		0x00, 0x00, // extra field length
-		fileCommentLengthBytes[0], fileCommentLengthBytes[1], // file comment length
-		0x00, 0x00, // disk # start
-		0x01, 0x00, // internal file attributes
-		0x20, 0x00, 0x00, 0x00, // external file attributes
-		0x00, 0x00, 0x00, 0x00, // offset of local header
-	}
-
-	centralDirectory = append(centralDirectory, fileName...)
-	centralDirectory = append(centralDirectory, fileComment...)
-
-	centralDirSize := uint32(len(centralDirectory))
-	centralDirSizeBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(centralDirSizeBytes, centralDirSize)
-
-	centralDirOffset := uint32(len(fileHeaderAndData))
-	centralDirOffsetBytes := make([]byte, 4)
-	binary.LittleEndian.PutUint32(centralDirOffsetBytes, centralDirOffset)
-
-	zipCommentLength := uint16(len(zipComment))
-	zipCommentLengthBytes := make([]byte, 2)
-	binary.LittleEndian.PutUint16(zipCommentLengthBytes, zipCommentLength)
-
-	endOfCentralDirectory := []byte{
-		0x50, 0x4b, 0x05, 0x06, // signature
-		0x00, 0x00, // number of this disk
-		0x00, 0x00, // number of the disk with the start of the central directory
-		0x01, 0x00, // total number of entries in the central directory on this disk
-		0x01, 0x00, // total number of entries in the central directory
-		centralDirSizeBytes[0], centralDirSizeBytes[1], centralDirSizeBytes[2], centralDirSizeBytes[3], // size of the central directory
-		centralDirOffsetBytes[0], centralDirOffsetBytes[1], centralDirOffsetBytes[2], centralDirOffsetBytes[3], // offset of start of central directory
-		zipCommentLengthBytes[0], zipCommentLengthBytes[1], // zip file comment length
-	}
-
-	endOfCentralDirectory = append(endOfCentralDirectory, zipComment...)
-
-	zipData := append(fileHeaderAndData, centralDirectory...)
-	zipData = append(zipData, endOfCentralDirectory...)
-
-	return makeTestFile(fs, zipName, zipData)
+type testfile struct {
+	name    string
+	comment string
+	data    []byte
 }
-*/
+
+func makeZipFile(t *testing.T, fs afero.Fs, zipname string, comment string, files []testfile) {
+	// Create test zip file using a different zip writer (so this test doesn't depend
+	// on my implementation of adding files to zip archive)
+	zipFile, err := fs.Create(zipname)
+	if err != nil {
+		t.Fatalf("fs.Create returned error: %v", err)
+	}
+	defer zipFile.Close()
+
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	for _, f := range files {
+		header := zip.FileHeader{
+			Name:           f.name,
+			Comment:        f.comment,
+			Modified:       time.Now(),
+			Method:         zip.Store,
+			CreatorVersion: 0x20,
+			ReaderVersion:  0x20,
+		}
+		writer, err := zipWriter.CreateHeader(&header)
+		if err != nil {
+			t.Fatalf("zipWriter.CreateHeader returned error: %v", err)
+		}
+		_, err = writer.Write(f.data)
+		if err != nil {
+			t.Fatalf("writer.Write returned error: %v", err)
+		}
+	}
+	zipWriter.SetComment(comment)
+}
+
+// Confirms that a zip file contains the expected files
+func verifyZipFile(t *testing.T, fs afero.Fs, zipname string, expZipComment string, expFiles []testfile) error {
+	zipFile, err := fs.Open(zipname)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+	info, err := zipFile.Stat()
+	if err != nil {
+		return err
+	}
+	zipReader, err := zip.NewReader(zipFile, info.Size())
+	if err != nil {
+		return err
+	}
+
+	if zipReader.Comment != expZipComment {
+		t.Errorf("zipReader.Comment is %q; Want: %q", zipReader.Comment, expZipComment)
+	}
+	if len(zipReader.File) != len(expFiles) {
+		t.Errorf("zipReader.File has length %d; Want: %d", len(zipReader.File), len(expFiles))
+	}
+
+	// Verify each file in the zip
+	for i, f := range zipReader.File {
+		if f.Name != expFiles[i].name {
+			t.Errorf("zipReader.File[%d].Name is %q; Want: %q", i, f.Name, expFiles[i].name)
+		}
+		if f.Comment != expFiles[i].comment {
+			t.Errorf("zipReader.File[%d].Comment is %q; Want: %q", i, f.Comment, expFiles[i].comment)
+		}
+		fFile, err := f.Open()
+		if err != nil {
+			return err
+		}
+		fData := make([]byte, len(expFiles[i].data))
+		fDataSize, err := fFile.Read(fData)
+		if err != nil {
+			fFile.Close()
+			return err
+		}
+		if fDataSize != len(expFiles[i].data) {
+			t.Errorf("zipReader.File[%d].Data has length %d; Want: %d", i, fDataSize, len(expFiles[i].data))
+		}
+		if !reflect.DeepEqual(fData, expFiles[i].data) {
+			t.Errorf("zipReader.File[%d].Data is %x; Want: %x", i, fData, expFiles[i].data)
+		}
+		fFile.Close()
+	}
+	return nil
+}
+
+// Confirms that a file contains the expected data
+func verifyFile(t *testing.T, fs afero.Fs, name string, data []byte) error {
+	file, err := fs.Open(name)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	fileData := make([]byte, len(data))
+	fileDataSize, err := file.Read(fileData)
+	if err != nil {
+		return err
+	}
+	if fileDataSize != len(data) {
+		t.Errorf("fileData has length %d; Want: %d", fileDataSize, len(data))
+	}
+	if !reflect.DeepEqual(fileData, data) {
+		t.Errorf("fileData is %v; Want: %v", fileData, data)
+	}
+	return nil
+}
 
 func TestReadDirectoryFailures(t *testing.T) {
 	appFs := afero.NewMemMapFs()
@@ -337,38 +353,15 @@ func TestExtract(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	fs := afero.NewMemMapFs()
+	fs := afero.NewOsFs()
 	zipFileName := "testArchive.zip"
-	zipFile, err := fs.Create(zipFileName)
-	if err != nil {
-		t.Fatalf("fs.Create returned error: %v", err)
+	files := []testfile{
+		{"file1.txt", "", []byte("This archive contains some text files.")},
+		{"filebeta.txt", "", []byte("Second file in the archive.")},
+		{"fileThree.txt", "", []byte("File number 3")},
 	}
 
-	// Create test zip file using a different zip writer (so this test doesn't depend
-	// on my implementation of adding files to zip archive)
-	zipWriter := zip.NewWriter(zipFile)
-	var files = []struct {
-		name, body string
-	}{
-		{"file1.txt", "This archive contains some text files."},
-		{"filebeta.txt", "Second file in the archive."},
-		{"fileThree.txt", "File number 3"},
-	}
-	for _, file := range files {
-		f, err := zipWriter.Create(file.name)
-		if err != nil {
-			t.Fatalf("zipWriter.Create returned error: %v", err)
-		}
-		_, err = f.Write([]byte(file.body))
-		if err != nil {
-			t.Fatalf("zipWriter.Write returned error: %v", err)
-		}
-	}
-	err = zipWriter.Close()
-	if err != nil {
-		t.Fatalf("zipWriter.Close returned error: %v", err)
-	}
-	zipFile.Close()
+	makeZipFile(t, fs, zipFileName, "", files)
 
 	zf, err := OpenWithFs(zipFileName, fs)
 	if err != nil {
@@ -383,26 +376,5 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("Close returned error: %v", err)
 	}
 
-	// Check that the file was deleted
-	zipFile, err = fs.Open(zipFileName)
-	if err != nil {
-		t.Fatalf("fs.Open returned error during verify step: %v", err)
-	}
-	info, err := zipFile.Stat()
-	if err != nil {
-		t.Fatalf("zipFile.Stat returned error during verify step: %v", err)
-	}
-	zipReader, err := zip.NewReader(zipFile, info.Size())
-	if err != nil {
-		t.Fatalf("zip.OpenReader returned error: %v", err)
-	}
-	if len(zipReader.File) != 2 {
-		t.Errorf("zipReader.File has length %d; Want: 2", len(zipReader.File))
-	}
-	for i, f := range zipReader.File {
-		if f.Name != files[i+1].name {
-			t.Errorf("zipReader.File[%d].Name is %q; Want: %q", i, f.Name, files[i+1].name)
-		}
-	}
-	zipFile.Close()
+	verifyZipFile(t, fs, zipFileName, "", files[1:])
 }
