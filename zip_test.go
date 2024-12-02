@@ -353,7 +353,7 @@ func TestExtract(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
-	fs := afero.NewOsFs()
+	fs := afero.NewMemMapFs()
 	zipFileName := "testArchive.zip"
 	files := []testfile{
 		{"file1.txt", "", []byte("This archive contains some text files.")},
@@ -377,4 +377,36 @@ func TestDelete(t *testing.T) {
 	}
 
 	verifyZipFile(t, fs, zipFileName, "", files[1:])
+}
+
+func TestAdd(t *testing.T) {
+	fs := afero.NewMemMapFs()
+	zipFileName := "testArchive.zip"
+	files := []testfile{
+		{"file1.txt", "", []byte("This archive contains some text files.")},
+		{"filebeta.txt", "", []byte("Second file in the archive.")},
+		{"fileThree.txt", "", []byte("File number 3")},
+	}
+
+	fileToAdd := testfile{"fileFour.txt", "", []byte("File number 4")}
+	makeTestFile(fs, fileToAdd.name, fileToAdd.data)
+
+	makeZipFile(t, fs, zipFileName, "", files)
+
+	zf, err := OpenWithFs(zipFileName, fs)
+	if err != nil {
+		t.Fatalf("OpenWithFs returned error: %v", err)
+	}
+
+	err = zf.AddFile(fileToAdd.name, COMPRESS_STORED)
+	if err != nil {
+		t.Fatalf("AddFile returned error: %v", err)
+	}
+	err = zf.Close()
+	if err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	files = append(files, fileToAdd)
+	verifyZipFile(t, fs, zipFileName, "", files)
 }
